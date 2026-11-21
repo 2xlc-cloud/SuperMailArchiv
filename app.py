@@ -1,3 +1,4 @@
+import base64
 import os
 import queue
 import re
@@ -14,6 +15,7 @@ from archive import (Account, account_password, archived_accounts, clean_passwor
                      saved_accounts, sync)
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane
+from program_icon import png_icon
 
 
 DATA = Path(os.getenv("LOCALAPPDATA") or Path.home()) / "MailArchiv"
@@ -37,6 +39,9 @@ class MailArchive:
         self.filters = []
         self.preview_id = None
         root.title(f"{APP_NAME} {VERSION_TEXT}")
+        icons = [tk.PhotoImage(master=root, data=base64.b64encode(png_icon(size)).decode("ascii"), format="png")
+                 for size in (16, 32, 48)]
+        root.iconphoto(True, *icons)
         root.geometry("1120x710")
         root.minsize(810, 500)
         root.protocol("WM_DELETE_WINDOW", self.close)

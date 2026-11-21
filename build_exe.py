@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from app_info import APP_NAME, VERSION, VERSION_TEXT
+from program_icon import ico_icon
 
 
 def version_resource():
@@ -43,9 +44,11 @@ def main():
     build.mkdir(exist_ok=True)
     resource = build / "version_info.txt"
     resource.write_text(version_resource(), encoding="utf-8")
+    icon = build / "SuperMailBackup.ico"
+    icon.write_bytes(ico_icon())
     run([
         "--noconfirm", "--clean", "--onefile", "--windowed", "--noupx",
-        "--name", APP_NAME, "--version-file", str(resource),
+        "--name", APP_NAME, "--version-file", str(resource), "--icon", str(icon),
         "--workpath", str(build / "work"), "--specpath", str(build),
         "--distpath", str(project / "dist"), str(project / "app.py"),
     ])
