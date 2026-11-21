@@ -50,6 +50,14 @@ def apply_theme(root, name):
                                           ("active", "#6aa0ff" if name == "dark" else hover)],
               foreground=[("disabled", disabled), ("pressed", "white")])
 
+    for widget in ("TCheckbutton", "TRadiobutton"):
+        style.configure(widget, background=bg, foreground=fg, indicatorbackground=field,
+                        indicatorforeground=fg, indicatorcolor=field, upperbordercolor=border,
+                        lowerbordercolor=border, padding=(0, 3))
+        style.map(widget, background=[("active", bg)], foreground=[("disabled", disabled)],
+                  indicatorcolor=[("selected", accent), ("pressed", selection)],
+                  indicatorbackground=[("disabled", panel)])
+
     style.configure("TEntry", padding=4)
     style.map("TEntry", fieldbackground=[("disabled", panel), ("readonly", field)],
               bordercolor=[("focus", accent)], foreground=[("disabled", disabled)])

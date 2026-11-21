@@ -20,9 +20,19 @@ Aus dem Quellcode starten:
 - Jede Nachricht anhand ihrer eindeutigen Mail-ID identifizieren und bei Bedarf als EML exportieren.
 - Text-, PNG- und GIF-Anhänge in der App ansehen. Weitere gängige Formate über die zugeordnete Windows-Anwendung öffnen.
 
+## Einstellungen
+
+Im Reiter **Einstellungen** lässt sich festlegen:
+
+- **Im Infobereich weiterlaufen:** Beim Schließen des Fensters läuft die App mit einem Symbol im Infobereich neben der Uhr weiter. Ein Klick auf das Symbol öffnet das Fenster wieder, Rechtsklick → **Beenden** beendet die App. Standardmäßig eingeschaltet.
+- **Mit Windows starten:** Trägt die App für das aktuelle Windows-Benutzerkonto in den Autostart ein. Optional startet sie dabei nur im Hintergrund. Wird die EXE an einen anderen Ort verschoben, bietet der Reiter an, den Autostart anzupassen.
+- **Darstellung:** Dunkel oder Hell.
+
+Ein erneuter Start der App öffnet das bereits laufende Fenster, statt eine zweite Instanz zu starten.
+
 ## Lokale Daten
 
-Die Datenbank liegt unter %LOCALAPPDATA%\MailArchiv\archiv.sqlite3. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
+Die Datenbank liegt unter %LOCALAPPDATA%\MailArchiv\archiv.sqlite3, die Einstellungen daneben in einstellungen.json. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
 
 IMAP-Kontodaten und optional gespeicherte Passwörter schützt Windows per DPAPI für das aktuelle Windows-Benutzerkonto. Mailinhalte und Anhänge sind in der Datenbank unverschlüsselt.
 

@@ -3,6 +3,7 @@ import os
 import queue
 import re
 import sqlite3
+import sys
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -16,6 +17,9 @@ from archive import (Account, account_password, archived_accounts, clean_passwor
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane
 from program_icon import png_icon
+from settings import (MINIMIZED_ARGUMENT, Settings, autostart_command, autostart_entry,
+                      set_autostart)
+from tray import TrayIcon, signal_running_instance
 
 
 DATA = Path(os.getenv("LOCALAPPDATA") or Path.home()) / "MailArchiv"
@@ -23,13 +27,16 @@ PAGE = 100
 
 
 class MailArchive:
-    def __init__(self, root, data):
+    def __init__(self, root, data, start_minimized=False):
         self.root = root
         self.path = data / "archiv.sqlite3"
-        self.theme_path = data / "darstellung.txt"
-        self.theme = self.load_theme()
         initialize(self.path)
+        self.settings = Settings(data)
+        self.theme = self.settings["theme"]
         self.events = queue.Queue()
+        self.tray = TrayIcon(APP_NAME, lambda action: self.events.put(("tray", action)))
+        self.tray.set_visible(self.settings["tray"])
+        self.hint_shown = False
         self.cancelled = threading.Event()
         self.busy = False
         self.offset = 0
@@ -50,27 +57,34 @@ class MailArchive:
         accounts = saved_accounts(self.path)
         self.reload_accounts(next(iter(accounts)) if len(accounts) == 1 else None)
         self.refresh()
+        if start_minimized and self.settings["start_hidden"]:
+            if self.settings["tray"]:
+                root.withdraw()
+            else:
+                root.iconify()
         root.after(100, self.poll)
-
-    def load_theme(self):
-        try:
-            name = self.theme_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            return "dark"
-        return name if name in PALETTES else "dark"
 
     def update_theme(self):
         apply_theme(self.root, self.theme)
         self.attachments.theme = self.theme
         self.theme_button.configure(text="Hell" if self.theme == "dark" else "Dunkel")
+        self.theme_choice.set(self.theme)
 
     def toggle_theme(self):
-        self.theme = "light" if self.theme == "dark" else "dark"
+        self.set_theme("light" if self.theme == "dark" else "dark")
+
+    def set_theme(self, name):
+        if name not in PALETTES:
+            return
+        self.theme = name
         self.update_theme()
+        self.save_setting("theme", name)
+
+    def save_setting(self, key, value):
         try:
-            self.theme_path.write_text(self.theme + "\n", encoding="utf-8")
+            self.settings.set(key, value)
         except OSError:
-            self.status.set("Die Darstellung konnte nicht für den nächsten Start gespeichert werden.")
+            self.status.set("Die Einstellung konnte nicht für den nächsten Start gespeichert werden.")
 
     def build(self):
         header = ttk.Frame(self.root, padding=(16, 12, 16, 4))
@@ -79,6 +93,7 @@ class MailArchive:
         self.theme_button = ttk.Button(header, width=7, command=self.toggle_theme)
         self.theme_button.pack(side="right")
         self.status = tk.StringVar(value="Bereit")
+        self.status.trace_add("write", lambda *_: self.tray.set_tooltip(f"{APP_NAME} · {self.status.get()}"))
         ttk.Label(self.root, textvariable=self.status, style="Status.TLabel", anchor="w").pack(
             side="bottom", fill="x"
         )
@@ -86,8 +101,10 @@ class MailArchive:
         self.tabs.pack(fill="both", expand=True, padx=12, pady=6)
         outer = self.archive_tab = ttk.Frame(self.tabs, padding=12)
         self.accounts_tab = ttk.Frame(self.tabs, padding=12)
+        self.settings_tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(outer, text="Archiv")
         self.tabs.add(self.accounts_tab, text="Konten")
+        self.tabs.add(self.settings_tab, text="Einstellungen")
 
         search_bar = ttk.Frame(outer)
         search_bar.pack(fill="x", pady=(0, 10))
@@ -165,6 +182,65 @@ class MailArchive:
         self.body.pack(fill="both", expand=True)
 
         self.build_accounts()
+        self.build_settings()
+
+    def build_settings(self):
+        page = self.settings_tab
+        behaviour = ttk.LabelFrame(page, text=" Programmverhalten ", padding=10)
+        behaviour.pack(fill="x")
+        self.tray_choice = tk.BooleanVar(value=self.settings["tray"])
+        ttk.Checkbutton(behaviour, variable=self.tray_choice, command=self.change_tray,
+                        text="Beim Schließen im Infobereich (neben der Uhr) weiterlaufen").pack(anchor="w")
+        ttk.Label(behaviour, style="Muted.TLabel",
+                  text="Ein Klick auf das Symbol öffnet das Fenster. Beenden per Rechtsklick → Beenden.").pack(
+            anchor="w", padx=(24, 0), pady=(0, 8))
+        self.autostart_choice = tk.BooleanVar()
+        ttk.Checkbutton(behaviour, variable=self.autostart_choice, command=self.change_autostart,
+                        text="Mit Windows starten").pack(anchor="w")
+        self.hidden_choice = tk.BooleanVar(value=self.settings["start_hidden"])
+        self.hidden_button = ttk.Checkbutton(
+            behaviour, variable=self.hidden_choice, text="Beim Windows-Start nur im Hintergrund starten",
+            command=lambda: self.save_setting("start_hidden", self.hidden_choice.get()))
+        self.hidden_button.pack(anchor="w", padx=(24, 0), pady=(4, 0))
+        self.autostart_note = ttk.Label(behaviour, style="Muted.TLabel", justify="left")
+        self.autostart_note.bind("<Configure>", lambda event: self.autostart_note.configure(wraplength=event.width))
+        self.autostart_fix = ttk.Button(behaviour, text="Autostart auf dieses Programm ändern",
+                                        command=lambda: self.change_autostart(True))
+
+        appearance = ttk.LabelFrame(page, text=" Darstellung ", padding=10)
+        appearance.pack(fill="x", pady=(10, 0))
+        self.theme_choice = tk.StringVar(value=self.theme)
+        for value, label in (("dark", "Dunkel"), ("light", "Hell")):
+            ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_choice,
+                            command=lambda: self.set_theme(self.theme_choice.get())).pack(side="left", padx=(0, 14))
+        self.update_autostart()
+
+    def change_tray(self):
+        enabled = self.tray_choice.get()
+        self.save_setting("tray", enabled)
+        self.tray.set_visible(enabled)
+
+    def change_autostart(self, enabled=None):
+        enabled = self.autostart_choice.get() if enabled is None else enabled
+        try:
+            set_autostart(enabled)
+        except OSError as error:
+            messagebox.showerror("Autostart", f"Der Autostart konnte nicht geändert werden.\n{error}", parent=self.root)
+        self.update_autostart()
+
+    def update_autostart(self):
+        entry = autostart_entry()
+        self.autostart_choice.set(entry is not None)
+        self.hidden_button.configure(state="normal" if entry else "disabled")
+        moved = entry is not None and entry.casefold() != autostart_command().casefold()
+        self.autostart_note.configure(
+            text=f"Der Autostart startet ein Programm an einem anderen Ort:\n{entry}" if moved else "")
+        if moved:
+            self.autostart_note.pack(anchor="w", fill="x", padx=(24, 0), pady=(4, 0))
+            self.autostart_fix.pack(anchor="w", padx=(24, 0), pady=(4, 0))
+        else:
+            self.autostart_note.pack_forget()
+            self.autostart_fix.pack_forget()
 
     def build_accounts(self):
         page = self.accounts_tab
@@ -454,6 +530,12 @@ class MailArchive:
     def poll(self):
         while not self.events.empty():
             event, value = self.events.get_nowait()
+            if event == "tray":
+                if value == "show":
+                    self.show_window()
+                elif value == "quit" and self.quit():
+                    return
+                continue
             if event == "progress":
                 if not self.cancelled.is_set():
                     self.status.set(f"{self.sync_user} · {value[0]} von {value[1]} geprüft")
@@ -470,18 +552,41 @@ class MailArchive:
                 state = "Abruf gestoppt" if self.cancelled.is_set() else "Abruf abgeschlossen"
                 missing = f" · {value[1]} nicht verfügbar" if value[1] else ""
                 self.status.set(f"{self.sync_user} · {state} · {value[0]} neu gesichert{missing}")
+                if self.root.state() == "withdrawn":
+                    self.tray.balloon(APP_NAME, self.status.get())
         self.root.after(100, self.poll)
 
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
     def close(self):
-        if not self.busy or messagebox.askyesno(APP_NAME, "Laufenden Abruf abbrechen und schließen?", parent=self.root):
-            self.cancelled.set()
-            self.root.destroy()
+        if not self.settings["tray"]:
+            self.quit()
+            return
+        self.root.withdraw()
+        if not self.hint_shown:
+            self.hint_shown = True
+            self.tray.balloon(APP_NAME, "Läuft im Infobereich weiter. Beenden per Rechtsklick auf das Symbol.")
+
+    def quit(self):
+        if self.busy:
+            self.show_window()
+            if not messagebox.askyesno(APP_NAME, "Laufenden Abruf abbrechen und beenden?", parent=self.root):
+                return False
+        self.cancelled.set()
+        self.tray.stop()
+        self.root.destroy()
+        return True
 
 
 if __name__ == "__main__":
+    if signal_running_instance():
+        sys.exit(0)
     root = tk.Tk()
     try:
-        MailArchive(root, DATA)
+        MailArchive(root, DATA, start_minimized=MINIMIZED_ARGUMENT in sys.argv[1:])
     except (OSError, ValueError, sqlite3.Error) as error:
         messagebox.showerror(f"{APP_NAME} konnte nicht starten", str(error), parent=root)
         root.destroy()
