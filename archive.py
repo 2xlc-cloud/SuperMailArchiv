@@ -67,6 +67,91 @@ def unknown_attachment_flags(path, limit=200, mail_ids=None):
                           (limit,)).fetchall()
 
 
+# --- Spam rating of the mail server (1.15.0) -----------------------------------------------------------------
+# Only the topmost header of each kind is used: the receiving server adds its own on top, while headers further
+# down may come from the sender and could be forged.
+SPAMD_RESULT = re.compile(rb"^X-Spamd-Result:\s*\w+:\s*(\w+)\s*\[\s*(-?[\d.]+)\s*/\s*(-?[\d.]+)\s*\](.*)$",
+                          re.I | re.M)
+SPAM_STATUS = re.compile(rb"^X-Spam-Status:\s*(\w+)\b(?:.*?\bscore=(-?[\d.]+))?", re.I | re.M)
+SPAM_SCORE = re.compile(rb"^X-(?:Spam|Rspamd)-Score:\s*(-?[\d.]+)", re.I | re.M)
+SPAM_FLAG = re.compile(rb"^X-Spam-Flag:\s*(\w+)", re.I | re.M)
+MS_SCL = re.compile(rb"^X-MS-Exchange-Organization-SCL:\s*(-?\d+)", re.I | re.M)
+AUTH_RESULTS = re.compile(rb"^Authentication-Results:(.*)$", re.I | re.M)
+SYMBOL = re.compile(rb"([A-Z][A-Z0-9_]+)\((-?[\d.]+)\)")
+
+
+def _headers(raw):
+    """Unfolded header block of a mail (at most the first 64 KB)."""
+    head = raw[:65536]
+    end = min((head.find(mark) for mark in (b"\r\n\r\n", b"\n\n") if mark in head), default=len(head))
+    return re.sub(rb"\r?\n[ \t]+", b" ", head[:end])
+
+
+def spam_info(raw):
+    """Spam rating from the server's headers: {score, flag, dmarc_fail, reasons}; score None if not rated."""
+    head = _headers(raw)
+    score, flag, reasons = None, False, []
+    match = SPAMD_RESULT.search(head)
+    if match:
+        score = float(match[2])
+        flag = match[1].lower() == b"true"
+        symbols = [(name.decode(), float(weight)) for name, weight in SYMBOL.findall(match[4])]
+        reasons = [name for name, weight in sorted(symbols, key=lambda item: -item[1]) if weight > 0][:5]
+    else:
+        status = SPAM_STATUS.search(head)
+        if status:
+            flag = status[1].lower() == b"yes"
+            score = float(status[2]) if status[2] else None
+        if score is None and (direct := SPAM_SCORE.search(head)):
+            score = float(direct[1])
+    if (marked := SPAM_FLAG.search(head)) and marked[1].lower() == b"yes":
+        flag = True
+    if (scl := MS_SCL.search(head)) and int(scl[1]) >= 5:
+        flag = True
+        reasons.append(f"Microsoft SCL {int(scl[1])}")
+    auth = AUTH_RESULTS.search(head)
+    dmarc_fail = bool(auth and re.search(rb"\bdmarc=fail\b", auth[1], re.I))
+    return {"score": score, "flag": flag, "dmarc_fail": dmarc_fail, "reasons": reasons}
+
+
+def _spam_columns(raw):
+    try:
+        info = spam_info(raw)
+    except Exception:
+        return None, 0, 0, 1
+    return info["score"], int(info["flag"]), int(info["dmarc_fail"]), 1
+
+
+def unknown_spam(path, limit=500, mail_ids=None):
+    """Mails whose spam rating was not yet read: [(id, start of the raw mail)], newest first."""
+    with closing(connect(path)) as db:
+        if mail_ids is not None:
+            marks = ",".join("?" * len(mail_ids))
+            return db.execute(f"SELECT id, substr(raw, 1, 65536) FROM mails WHERE spam_checked IS NULL "
+                              f"AND id IN ({marks})", tuple(mail_ids)).fetchall() if mail_ids else []
+        return db.execute("SELECT id, substr(raw, 1, 65536) FROM mails WHERE spam_checked IS NULL "
+                          "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+
+def store_spam(path, rated):
+    """rated: {mail id: (score, flag, dmarc_fail, 1)}."""
+    with closing(connect(path)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        db.executemany("UPDATE mails SET spam_score=?, spam_flag=?, dmarc_fail=?, spam_checked=? WHERE id=?",
+                       [(*values, mail_id) for mail_id, values in rated.items()])
+
+
+def spam_progress(path):
+    with closing(connect(path)) as db:
+        return tuple(db.execute("SELECT count(spam_checked), count(*) FROM mails").fetchone())
+
+
+def suspicious_sql(threshold):
+    """SQL condition for mails the server rated as suspicious."""
+    return (f"(coalesce(spam_score, -1000) >= {float(threshold)} OR coalesce(spam_flag, 0) = 1 "
+            "OR coalesce(dmarc_fail, 0) = 1)")
+
+
 def attachment_progress(path):
     """(mails checked, all mails) for the paperclip detection."""
     with closing(connect(path)) as db:
@@ -412,6 +497,12 @@ def initialize(path):
         if "has_attachments" not in {row[1] for row in db.execute("PRAGMA table_info(mails)")}:
             # 1.12.0: paperclip in the mail list. NULL = not yet determined (older mails are checked later).
             db.execute("ALTER TABLE mails ADD COLUMN has_attachments INTEGER")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(mails)")}
+        for column, kind in (("spam_score", "REAL"), ("spam_flag", "INTEGER"), ("dmarc_fail", "INTEGER"),
+                             ("spam_checked", "INTEGER")):
+            if column not in columns:
+                # 1.15.0: spam rating of the mail server; spam_checked NULL = not yet read from the headers.
+                db.execute(f"ALTER TABLE mails ADD COLUMN {column} {kind}")
         _create_search_index(db)
         db.commit()
 
@@ -687,6 +778,7 @@ SORT_KEYS = {
     "time": "strftime('%H:%M:%S', sent, 'unixepoch', 'localtime')",
     "attach": "coalesce(has_attachments, 0)",
     "size": "length(raw)",
+    "spam": "coalesce(spam_score, -1000)",  # Replaced in find_mails: suspicious first (needs the threshold).
 }
 
 
@@ -756,7 +848,7 @@ def fts_query(words):
 
 
 def find_mails(path, query, offset=0, limit=100, account_id=None, folder=None, sort="date", descending=True,
-               sender=None):
+               sender=None, only_suspicious=False, threshold=5):
     conditions, params = [], []
     words = search_words(query)
     if words:
@@ -784,12 +876,18 @@ def find_mails(path, query, offset=0, limit=100, account_id=None, folder=None, s
         # Compare the whole address, whatever display name was used ("hanna@" must not match "anna@").
         conditions.append("address(sender) = ?")
         params.append(sender.casefold())
+    if only_suspicious:
+        conditions.append(suspicious_sql(threshold))
     where = " AND ".join(conditions) or "1"
     direction = "DESC" if descending else "ASC"
-    order = f"{SORT_KEYS.get(sort, 'sent')} {direction}, sent {direction}, id {direction}"
+    key = SORT_KEYS.get(sort, "sent")
+    if sort == "spam":
+        key = f"(CASE WHEN {suspicious_sql(threshold)} THEN 1000 ELSE 0 END + coalesce(spam_score, -1000))"
+    order = f"{key} {direction}, sent {direction}, id {direction}"
     with closing(connect(path)) as db:
         return db.execute(
-            f"SELECT id, sender, subject, sent, has_attachments, length(raw) AS size FROM mails WHERE {where} "
+            f"SELECT id, sender, subject, sent, has_attachments, length(raw) AS size, spam_score, spam_flag, "
+            f"dmarc_fail, spam_checked FROM mails WHERE {where} "
             f"ORDER BY {order} LIMIT ? OFFSET ?", (*params, limit, offset)
         ).fetchall()
 
@@ -1075,10 +1173,10 @@ def _sync_folder(client, db, account_id, folder, progress, cancelled, criteria=(
                 cursor = db.execute(
                     """INSERT INTO mails
                        (mail_id,account_id,folder,validity,uid,sender,recipient,subject,sent,body,raw,
-                        has_attachments)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        has_attachments,spam_score,spam_flag,dmarc_fail,spam_checked)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id,folder,validity,uid) DO NOTHING""",
-                    (str(uuid4()), *key, uid, *safe_parse_mail(raw, received), raw, has_attachments(raw))
+                    (str(uuid4()), *key, uid, *safe_parse_mail(raw, received), raw, has_attachments(raw), *_spam_columns(raw))
                 )
                 if cursor.rowcount:
                     _index_new_mail(db, cursor.lastrowid)

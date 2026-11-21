@@ -18,12 +18,13 @@ from archive import (Account, account_folders, account_password, clean_password,
                      get_period, get_skip_deleted, resolve_period, set_period, set_skip_deleted, count_mails, delete_account, delete_folder_mails,
                      delete_mails, display_text, has_attachments, sender_address, store_attachment_flags,
                      unknown_attachment_flags, attachment_progress, build_search_index,
+                     spam_info, spam_progress, store_spam, unknown_spam,
                      get_mail, initialize, load_folders, remember_password, remove_account, save_account,
                      saved_accounts, set_folder_selection, sync)
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane, remove_old_temporary_files
 from program_icon import png_icon
-from settings import (INTERVALS, MINIMIZED_ARGUMENT, Settings, autostart_command, autostart_entry,
+from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
                       set_autostart)
 from tray import TrayIcon, signal_running_instance
 import updater
@@ -54,6 +55,7 @@ class MailArchive:
         self.accounts = {}
         self.preview_id = None
         self.visible_unknown = set()  # Mails on the current page whose paperclip is not yet known.
+        self.visible_unrated = set()  # Mails on the current page whose spam rating was not yet read.
         # Set while the user interface queries the database; the background work then pauses, because both
         # need Python's global interpreter lock and the interface must not wait for it.
         self.foreground = threading.Event()
@@ -143,6 +145,9 @@ class MailArchive:
         ttk.Button(search_bar, text="Leeren", command=lambda: self.query.set("")).pack(side="left", padx=(7, 0))
         self.sender_filter = None
         self.sender_filter_button = ttk.Button(search_bar, command=lambda: self.filter_sender(None))
+        self.only_suspicious = tk.BooleanVar(value=False)
+        ttk.Checkbutton(search_bar, text="Nur verdächtige ⚠", variable=self.only_suspicious,
+                        command=self.set_filter).pack(side="left", padx=(12, 0))
 
         panes = ttk.Panedwindow(outer, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -175,7 +180,7 @@ class MailArchive:
             self.table.heading(key, command=lambda key=key: self.sort_by(key))
             self.table.column(key, width=width, minwidth=34 if key == "attach" else 55,
                               stretch=key in ("subject", "sender"),
-                              anchor={"attach": "center", "size": "e"}.get(key, "w"))
+                              anchor={"attach": "center", "size": "e", "spam": "e"}.get(key, "w"))
         self.update_sort_headings()
         scroll = ttk.Scrollbar(results, command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
@@ -285,7 +290,16 @@ class MailArchive:
         row.columnconfigure(1, weight=1)
         appearance = ttk.LabelFrame(row, text=" Darstellung ", padding=10)
         appearance.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        self.build_updates(row).grid(row=0, column=1, sticky="nsew")
+        spam = ttk.LabelFrame(row, text=" Spam-Erkennung ", padding=10)
+        spam.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(10, 0))
+        ttk.Label(spam, text="Verdächtig ab").pack(side="left")
+        self.spam_choice = ttk.Combobox(spam, state="readonly", width=4,
+                                        values=[str(points) for points in SPAM_THRESHOLDS])
+        self.spam_choice.set(str(self.settings["spam_threshold"]))
+        self.spam_choice.pack(side="left", padx=6)
+        self.spam_choice.bind("<<ComboboxSelected>>", lambda _: self.change_spam_threshold())
+        ttk.Label(spam, text="Punkten").pack(side="left")
+        self.build_updates(row).grid(row=0, column=1, rowspan=2, sticky="nsew")
         self.theme_choice = tk.StringVar(value=self.theme)
         for value, label in (("dark", "Dunkel"), ("light", "Hell")):
             ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_choice,
@@ -619,6 +633,10 @@ class MailArchive:
         if self.quit():
             subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{program}"',
                              creationflags=0x08000000)  # No console window.
+
+    def change_spam_threshold(self):
+        self.save_setting("spam_threshold", int(self.spam_choice.get()))
+        self.refresh()
 
     def change_tray(self):
         enabled = self.tray_choice.get()
@@ -1159,7 +1177,7 @@ class MailArchive:
         self.refresh()
 
     COLUMNS = {"attach": ("📎", 46), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 85),
-               "time": ("Uhrzeit", 65), "size": ("Größe", 75)}
+               "time": ("Uhrzeit", 65), "size": ("Größe", 75), "spam": ("Spam", 70)}
     PAPERCLIP = "📎"
 
     def sort_by(self, key):
@@ -1168,7 +1186,7 @@ class MailArchive:
             descending = not self.settings["sort_descending"]
         else:
             # Newest, largest and mails with attachments first; texts A–Z.
-            descending = key in ("date", "time", "attach", "size")
+            descending = key in ("date", "time", "attach", "size", "spam")
         self.save_setting("sort", key)
         self.save_setting("sort_descending", descending)
         self.update_sort_headings()
@@ -1187,7 +1205,66 @@ class MailArchive:
             if indexed >= total:
                 break
             time.sleep(0.05)
+        self.read_spam_ratings()
         self.detect_attachments()
+
+    def read_spam_ratings(self):
+        """Background: take over the server's spam rating for mails archived before 1.15.0 (visible ones first)."""
+        while True:
+            try:
+                visible = self.visible_unrated
+                self.visible_unrated = set()
+                batch = unknown_spam(self.path, mail_ids=visible) if visible else []
+                if not batch:
+                    batch = unknown_spam(self.path)
+                if not batch:
+                    self.events.put(("spam_progress", None))
+                    return
+                rated = {}
+                for mail_id, head in batch:
+                    self.pause_for_interface()
+                    try:
+                        info = spam_info(head)
+                        rated[mail_id] = (info["score"], int(info["flag"]), int(info["dmarc_fail"]), 1)
+                    except Exception:
+                        rated[mail_id] = (None, 0, 0, 1)
+                store_spam(self.path, rated)
+                progress = spam_progress(self.path)
+            except (OSError, sqlite3.Error):
+                time.sleep(5)
+                continue
+            self.events.put(("spam_ratings", rated))
+            self.events.put(("spam_progress", progress))
+            time.sleep(0.02)
+
+    def spam_suspicious(self, score, flag, dmarc_fail):
+        return bool(flag or dmarc_fail or (score is not None and score >= self.settings["spam_threshold"]))
+
+    def spam_label(self, score, flag, dmarc_fail):
+        """Score of the server's spam rating, with ⚠ for suspicious mails; empty if the mail was not rated."""
+        if score is None and not flag and not dmarc_fail:
+            return ""
+        text = "" if score is None else f"{score:.1f}".replace(".", ",")
+        return ("⚠ " + text).strip() if self.spam_suspicious(score, flag, dmarc_fail) else text
+
+    def spam_explanation(self, raw):
+        """Line for the preview: why the server considers a mail suspicious (or that it is not)."""
+        try:
+            info = spam_info(raw)
+        except Exception:
+            return ""
+        if info["score"] is None and not info["flag"] and not info["dmarc_fail"]:
+            return ""
+        parts = []
+        if info["score"] is not None:
+            parts.append(f"{info['score']:.1f}".replace(".", ",") + f" Punkte (Grenze {self.settings['spam_threshold']})")
+        if info["flag"]:
+            parts.append("vom Server als Spam markiert")
+        if info["dmarc_fail"]:
+            parts.append("Absender nicht bestätigt (DMARC fail)")
+        suspicious = self.spam_suspicious(info["score"], info["flag"], info["dmarc_fail"])
+        reasons = f" · Gründe: {', '.join(info['reasons'][:4])}" if suspicious and info["reasons"] else ""
+        return ("⚠ Spamverdacht: " if suspicious else "Spam-Bewertung: ") + ", ".join(parts) + reasons
 
     def pause_for_interface(self):
         while self.foreground.is_set():
@@ -1252,17 +1329,20 @@ class MailArchive:
         try:
             rows = find_mails(self.path, self.query.get(), self.offset, PAGE + 1, *self.current_filter(),
                               sort=self.settings["sort"], descending=self.settings["sort_descending"],
-                              sender=self.sender_filter)
+                              sender=self.sender_filter, only_suspicious=self.only_suspicious.get(),
+                              threshold=self.settings["spam_threshold"])
         finally:
             self.foreground.clear()
         self.table.delete(*self.table.get_children())
         # Let the background detection check the mails on this page first.
         self.visible_unknown = {row["id"] for row in rows[:PAGE] if row["has_attachments"] is None}
+        self.visible_unrated = {row["id"] for row in rows[:PAGE] if row["spam_checked"] is None}
         for row in rows[:PAGE]:
             self.table.insert("", "end", iid=str(row["id"]),
                               values=(self.PAPERCLIP if row["has_attachments"] else "",
                                       row["subject"] or "(Ohne Betreff)", row["sender"], self.date_label(row["sent"]),
-                                      self.time_label(row["sent"]), self.size_label(row["size"])))
+                                      self.time_label(row["sent"]), self.size_label(row["size"]),
+                                      self.spam_label(row["spam_score"], row["spam_flag"], row["dmarc_fail"])))
         count = min(len(rows), PAGE)
         self.page_label.configure(text=f"{self.offset + 1}–{self.offset + count}" if count else "Keine Treffer")
         self.prev.configure(state="normal" if self.offset else "disabled")
@@ -1284,6 +1364,10 @@ class MailArchive:
         self.mail_id.set(row["mail_id"] if row else "")
         self.copy_button.configure(state="normal" if row else "disabled")
         raw = get_mail(self.path, mail_id, raw=True)["raw"] if row else None
+        if raw is not None:
+            spam = self.spam_explanation(raw)
+            if spam:
+                self.meta.configure(text=self.meta.cget("text") + "\n" + spam)
         text = ((display_text(raw) if raw is not None else None) or row["body"]
                 or "(Kein Textinhalt. Das Original enthält auch etwaige Anhänge.)") if row else ""
         self.show_body(text)
@@ -1414,6 +1498,17 @@ class MailArchive:
                     self.show_window()
                 elif value == "quit" and self.quit():
                     return
+                continue
+            if event == "spam_ratings":
+                for mail_id, (score, flag, dmarc_fail, _) in value.items():
+                    if self.table.exists(str(mail_id)):
+                        self.table.set(str(mail_id), "spam", self.spam_label(score, flag, dmarc_fail))
+                continue
+            if event == "spam_progress":
+                if not self.busy and value is not None:
+                    known, total = value
+                    self.status.set(f"Spam-Bewertungen werden übernommen: {self.number(known)} von "
+                                    f"{self.number(total)} Mails")
                 continue
             if event == "attachment_flags":
                 for mail_id, flag in value.items():
