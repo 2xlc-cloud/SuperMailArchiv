@@ -3,27 +3,35 @@ import os
 import queue
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
+import time
+import webbrowser
 import tkinter as tk
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from app_info import APP_NAME, VERSION_TEXT
-from archive import (Account, account_password, archived_accounts, clean_password, find_mails,
-                     get_mail, initialize, remember_password, remove_account, save_account,
-                     saved_accounts, sync)
+from archive import (Account, account_folders, account_password, clean_password, find_mails, folder_tree,
+                     get_period, get_skip_deleted, resolve_period, set_period, set_skip_deleted, count_mails, delete_account, delete_folder_mails,
+                     delete_mails, display_text, has_attachments, sender_address, store_attachment_flags,
+                     unknown_attachment_flags, attachment_progress, build_search_index,
+                     get_mail, initialize, load_folders, remember_password, remove_account, save_account,
+                     saved_accounts, set_folder_selection, sync)
 from appearance import PALETTES, apply_theme
-from attachments import AttachmentPane
+from attachments import AttachmentPane, remove_old_temporary_files
 from program_icon import png_icon
-from settings import (MINIMIZED_ARGUMENT, Settings, autostart_command, autostart_entry,
+from settings import (INTERVALS, MINIMIZED_ARGUMENT, Settings, autostart_command, autostart_entry,
                       set_autostart)
 from tray import TrayIcon, signal_running_instance
+import updater
 
 
 DATA = Path(os.getenv("LOCALAPPDATA") or Path.home()) / "MailArchiv"
 PAGE = 100
+FIRST_AUTO_SYNC = 60  # Seconds after program start, so the backup runs soon after Windows starts.
 
 
 class MailArchive:
@@ -31,6 +39,7 @@ class MailArchive:
         self.root = root
         self.path = data / "archiv.sqlite3"
         initialize(self.path)
+        remove_old_temporary_files()
         self.settings = Settings(data)
         self.theme = self.settings["theme"]
         self.events = queue.Queue()
@@ -43,17 +52,26 @@ class MailArchive:
         self.pending_search = None
         self.account_id = None
         self.accounts = {}
-        self.filters = []
         self.preview_id = None
+        self.visible_unknown = set()  # Mails on the current page whose paperclip is not yet known.
+        # Set while the user interface queries the database; the background work then pauses, because both
+        # need Python's global interpreter lock and the interface must not wait for it.
+        self.foreground = threading.Event()
+        self.sync_auto = False
+        self.next_auto = time.time() + FIRST_AUTO_SYNC
         root.title(f"{APP_NAME} {VERSION_TEXT}")
-        icons = [tk.PhotoImage(master=root, data=base64.b64encode(png_icon(size)).decode("ascii"), format="png")
-                 for size in (16, 32, 48)]
-        root.iconphoto(True, *icons)
+        self.window_icons = {
+            color: [tk.PhotoImage(master=root, data=base64.b64encode(png_icon(size, color)).decode("ascii"),
+                                  format="png") for size in (16, 32, 48)]
+            for color in ("blue", "orange")
+        }
+        root.iconphoto(True, *self.window_icons["blue"])
         root.geometry("1120x710")
-        root.minsize(810, 500)
+        root.minsize(810, 600)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.build()
         self.update_theme()
+        self.update_developer_ui()
         accounts = saved_accounts(self.path)
         self.reload_accounts(next(iter(accounts)) if len(accounts) == 1 else None)
         self.refresh()
@@ -63,9 +81,12 @@ class MailArchive:
             else:
                 root.iconify()
         root.after(100, self.poll)
+        threading.Thread(target=self.background_work, daemon=True, name="Hintergrundarbeit").start()
+        root.after(10_000, self.scheduled_update_check)
 
     def update_theme(self):
         apply_theme(self.root, self.theme)
+        self.body.tag_configure("link", foreground=PALETTES[self.theme]["accent"])
         self.attachments.theme = self.theme
         self.theme_button.configure(text="Hell" if self.theme == "dark" else "Dunkel")
         self.theme_choice.set(self.theme)
@@ -92,6 +113,7 @@ class MailArchive:
         ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
         self.theme_button = ttk.Button(header, width=7, command=self.toggle_theme)
         self.theme_button.pack(side="right")
+        self.developer_label = ttk.Label(header, text="Entwicklermodus", style="Developer.TLabel")
         self.status = tk.StringVar(value="Bereit")
         self.status.trace_add("write", lambda *_: self.tray.set_tooltip(f"{APP_NAME} · {self.status.get()}"))
         ttk.Label(self.root, textvariable=self.status, style="Status.TLabel", anchor="w").pack(
@@ -108,10 +130,6 @@ class MailArchive:
 
         search_bar = ttk.Frame(outer)
         search_bar.pack(fill="x", pady=(0, 10))
-        ttk.Label(search_bar, text="Konto").pack(side="left", padx=(0, 6))
-        self.account_filter = ttk.Combobox(search_bar, state="readonly", width=30)
-        self.account_filter.pack(side="left", padx=(0, 14))
-        self.account_filter.bind("<<ComboboxSelected>>", lambda _: self.set_filter())
         ttk.Label(search_bar, text="Suche").pack(side="left", padx=(0, 7))
         self.query = tk.StringVar()
         search = ttk.Entry(search_bar, textvariable=self.query)
@@ -123,13 +141,26 @@ class MailArchive:
         self.root.bind("<Control-f>", focus_search)
         self.query.trace_add("write", self.schedule_search)
         ttk.Button(search_bar, text="Leeren", command=lambda: self.query.set("")).pack(side="left", padx=(7, 0))
+        self.sender_filter = None
+        self.sender_filter_button = ttk.Button(search_bar, command=lambda: self.filter_sender(None))
 
         panes = ttk.Panedwindow(outer, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        results = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        folders = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        results = ttk.Frame(panes, padding=(6, 0, 6, 0))
         preview = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(folders, weight=0)
         panes.add(results, weight=1)
         panes.add(preview, weight=1)
+        self.folder_tree = ttk.Treeview(folders, show="tree", selectmode="browse")
+        self.folder_tree.column("#0", width=210, minwidth=120)
+        folder_scroll = ttk.Scrollbar(folders, command=self.folder_tree.yview)
+        self.folder_tree.configure(yscrollcommand=folder_scroll.set)
+        folder_scroll.pack(side="right", fill="y")
+        self.folder_tree.pack(fill="both", expand=True)
+        self.folder_tree.bind("<<TreeviewSelect>>", lambda _: self.select_folder())
+        self.folder_tree.bind("<Button-3>", self.folder_tree_menu)
+        self.folder_nodes = {}
 
         nav = ttk.Frame(results)
         nav.pack(side="bottom", fill="x", pady=(7, 0))
@@ -139,16 +170,20 @@ class MailArchive:
         self.next.pack(side="right")
         self.page_label = ttk.Label(nav, style="Muted.TLabel")
         self.page_label.pack(pady=7)
-        self.table = ttk.Treeview(results, columns=("subject", "sender", "date"),
-                                  show="headings", selectmode="browse")
-        for key, label, width in (("subject", "Betreff", 215), ("sender", "Von", 145), ("date", "Datum", 95)):
-            self.table.heading(key, text=label)
-            self.table.column(key, width=width, minwidth=65, stretch=key != "date")
+        self.table = ttk.Treeview(results, columns=tuple(self.COLUMNS), show="headings", selectmode="extended")
+        for key, (label, width) in self.COLUMNS.items():
+            self.table.heading(key, command=lambda key=key: self.sort_by(key))
+            self.table.column(key, width=width, minwidth=34 if key == "attach" else 55,
+                              stretch=key in ("subject", "sender"),
+                              anchor={"attach": "center", "size": "e"}.get(key, "w"))
+        self.update_sort_headings()
         scroll = ttk.Scrollbar(results, command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.table.pack(fill="both", expand=True)
         self.table.bind("<<TreeviewSelect>>", self.show_selection)
+        self.table.bind("<Button-3>", self.mail_menu)
+        self.table.bind("<Delete>", lambda _: self.delete_selected_mails())
 
         self.subject = ttk.Label(preview, text="Mailvorschau", style="Preview.TLabel")
         self.subject.pack(fill="x")
@@ -165,9 +200,13 @@ class MailArchive:
         )
         self.copy_button = ttk.Button(identifier, text="Kopieren", command=self.copy_mail_id, state="disabled")
         self.copy_button.pack(side="left", padx=(5, 0))
-        self.export = ttk.Button(preview, text="Original als .eml speichern",
+        actions = ttk.Frame(preview)
+        actions.pack(side="bottom", fill="x", pady=(8, 0))
+        self.export = ttk.Button(actions, text="Original als .eml speichern",
                                  command=self.export_mail, state="disabled")
-        self.export.pack(side="bottom", anchor="e", pady=(8, 0))
+        self.export.pack(side="right")
+        self.delete_button = ttk.Button(actions, text="Aus Archiv löschen …", command=self.delete_selected_mails,
+                                        state="disabled")
         self.preview_tabs = ttk.Notebook(preview)
         self.preview_tabs.pack(fill="both", expand=True)
         message = ttk.Frame(self.preview_tabs)
@@ -180,6 +219,11 @@ class MailArchive:
         self.body.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.body.pack(fill="both", expand=True)
+        self.links = {}
+        self.body.tag_configure("link", underline=True)
+        self.body.tag_bind("link", "<Button-1>", self.open_link)
+        self.body.bind("<Motion>", self.hover_link)
+        self.body.bind("<Leave>", self.hover_link)
 
         self.build_accounts()
         self.build_settings()
@@ -207,13 +251,374 @@ class MailArchive:
         self.autostart_fix = ttk.Button(behaviour, text="Autostart auf dieses Programm ändern",
                                         command=lambda: self.change_autostart(True))
 
-        appearance = ttk.LabelFrame(page, text=" Darstellung ", padding=10)
-        appearance.pack(fill="x", pady=(10, 0))
+        automatic = ttk.LabelFrame(page, text=" Automatischer Abruf ", padding=10)
+        automatic.pack(fill="x", pady=(10, 0))
+        row = ttk.Frame(automatic)
+        row.pack(fill="x")
+        ttk.Label(row, text="Alle Konten abrufen").pack(side="left", padx=(0, 8))
+        self.interval_choice = ttk.Combobox(row, state="readonly", width=18, values=list(INTERVALS.values()))
+        self.interval_choice.current(list(INTERVALS).index(self.settings["interval"]))
+        self.interval_choice.pack(side="left")
+        self.interval_choice.bind("<<ComboboxSelected>>", lambda _: self.change_interval())
+        self.next_label = ttk.Label(row, style="Muted.TLabel")
+        self.next_label.pack(side="left", padx=(12, 0))
+        hint = ttk.Label(automatic, style="Muted.TLabel", justify="left",
+                         text="Automatisch abgerufen werden nur Konten mit gespeichertem Passwort (Reiter Konten). "
+                              "Während eines Abrufs ist das Symbol orange.")
+        hint.pack(anchor="w", fill="x", pady=(6, 0))
+        hint.bind("<Configure>", lambda event: hint.configure(wraplength=event.width))
+
+        developer = ttk.LabelFrame(page, text=" Entwicklermodus ", padding=10)
+        developer.pack(fill="x", pady=(10, 0), side="bottom")
+        self.developer_choice = tk.BooleanVar(value=self.settings["developer"])
+        ttk.Checkbutton(developer, variable=self.developer_choice, command=self.change_developer,
+                        text="Entwicklermodus aktivieren").pack(anchor="w")
+        note = ttk.Label(developer, style="Muted.TLabel", justify="left", wraplength=600,
+                         text="Erlaubt, archivierte Mails, Ordner und Konten aus dem lokalen Archiv zu löschen "
+                              "(Rechtsklick im Reiter Archiv oder Entf-Taste). Auf dem Mailserver wird nichts "
+                              "gelöscht.")
+        note.pack(anchor="w", fill="x", padx=(24, 0))
+        note.bind("<Configure>", lambda event: note.configure(wraplength=event.width))
+
+        row = ttk.Frame(page)
+        row.pack(fill="x", pady=(10, 0))
+        row.columnconfigure(1, weight=1)
+        appearance = ttk.LabelFrame(row, text=" Darstellung ", padding=10)
+        appearance.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.build_updates(row).grid(row=0, column=1, sticky="nsew")
         self.theme_choice = tk.StringVar(value=self.theme)
         for value, label in (("dark", "Dunkel"), ("light", "Hell")):
             ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_choice,
                             command=lambda: self.set_theme(self.theme_choice.get())).pack(side="left", padx=(0, 14))
         self.update_autostart()
+
+    def change_interval(self):
+        minutes = list(INTERVALS)[self.interval_choice.current()]
+        self.save_setting("interval", minutes)
+        self.next_auto = time.time() + minutes * 60
+        self.update_next_label()
+
+    def update_next_label(self):
+        if not self.settings["interval"]:
+            text = ""
+        elif self.busy:
+            text = "Abruf läuft …"
+        else:
+            text = f"Nächster Abruf um {datetime.fromtimestamp(self.next_auto):%H:%M} Uhr"
+        if self.next_label.cget("text") != text:
+            self.next_label.configure(text=text)
+
+    def start_auto_sync(self):
+        minutes = self.settings["interval"]
+        self.next_auto = time.time() + minutes * 60
+        jobs = []
+        for key, account in saved_accounts(self.path).items():
+            password = account_password(self.path, key)
+            if password:
+                jobs.append((account, password))
+        if not jobs:
+            self.status.set("Automatischer Abruf: Kein Konto mit gespeichertem Passwort")
+            return
+        self.run_sync(jobs, automatic=True)
+
+    def set_sync_state(self, busy):
+        self.busy = busy
+        self.tray.set_busy(busy)
+        self.root.iconphoto(True, *self.window_icons["orange" if busy else "blue"])
+        self.update_account_buttons()
+        self.abort_button.configure(state="normal" if busy else "disabled")
+        self.update_next_label()
+
+    # --- Developer mode: delete archived data from the local database only -------------------------
+
+    def developer_allowed(self):
+        # Single place to add a password check later.
+        return self.settings["developer"]
+
+    def change_developer(self):
+        enabled = self.developer_choice.get()
+        if enabled and not messagebox.askyesno(
+                "Entwicklermodus",
+                "Im Entwicklermodus lassen sich archivierte Mails, Ordner und Konten endgültig aus dem lokalen "
+                "Archiv löschen. Auf dem Mailserver wird nichts gelöscht.\n\nEntwicklermodus aktivieren?",
+                parent=self.root):
+            self.developer_choice.set(False)
+            return
+        self.save_setting("developer", enabled)
+        self.update_developer_ui()
+
+    def update_developer_ui(self):
+        if self.settings["developer"]:
+            self.developer_label.pack(side="right", padx=(0, 12))
+            self.delete_button.pack(side="left")
+        else:
+            self.developer_label.pack_forget()
+            self.delete_button.pack_forget()
+
+    def confirm_delete(self, title, what, count):
+        return messagebox.askyesno(
+            title,
+            f"{what} endgültig aus dem lokalen Archiv löschen?\n\n"
+            f"Betroffen: {count} archivierte Mail{'' if count == 1 else 's'}. Das lässt sich nicht rückgängig machen. "
+            "Auf dem Mailserver wird nichts gelöscht. Liegen die Mails dort noch und passen sie zu Ordnerauswahl "
+            "und Zeitraum, archiviert der nächste Abruf sie erneut.",
+            icon="warning", parent=self.root)
+
+    def popup(self, event, entries):
+        menu = tk.Menu(self.root, tearoff=False)
+        for label, command in entries:
+            menu.add_command(label=label, command=command)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def mail_menu(self, event):
+        row = self.table.identify_row(event.y)
+        if not row:
+            return
+        if row not in self.table.selection():
+            self.table.selection_set(row)
+        address = sender_address(self.table.set(row, "sender"))
+        entries = []
+        if address:
+            entries.append((f"Nur Mails von {address} anzeigen", lambda: self.filter_sender(address)))
+        if self.sender_filter:
+            entries.append(("Absenderfilter aufheben", lambda: self.filter_sender(None)))
+        if self.developer_allowed():
+            count = len(self.table.selection())
+            entries.append((f"{count} Mails aus Archiv löschen …" if count > 1 else "Mail aus Archiv löschen …",
+                            self.delete_selected_mails))
+        if entries:
+            self.popup(event, entries)
+
+    def filter_sender(self, address):
+        """Show only mails from one sender address (None removes the filter)."""
+        self.sender_filter = address
+        if address:
+            self.sender_filter_button.configure(text=f"Von: {address}  ✕")
+            self.sender_filter_button.pack(side="left", padx=(7, 0))
+        else:
+            self.sender_filter_button.pack_forget()
+        self.offset = 0
+        self.refresh()
+
+    def delete_selected_mails(self):
+        ids = [int(item) for item in self.table.selection()]
+        if not ids or not self.developer_allowed() or self.busy:
+            return
+        what = "Die ausgewählte Mail" if len(ids) == 1 else f"Die {len(ids)} ausgewählten Mails"
+        if not self.confirm_delete("Mails löschen", what, len(ids)):
+            return
+        self.run_delete(lambda: delete_mails(self.path, ids))
+
+    def folder_tree_menu(self, event):
+        node = self.folder_tree.identify_row(event.y)
+        if not node or not self.developer_allowed():
+            return
+        self.folder_tree.selection_set(node)
+        key, folder = self.folder_nodes.get(node, (None, None))
+        if key is None:
+            return
+        if folder is None:
+            account = next((a for k, a, _ in folder_tree(self.path) if k == key), None)
+            entries = [("Konto mit allen Mails aus Archiv löschen …", lambda: self.delete_whole_account(key, account))]
+        else:
+            entries = [("Ordner aus Archiv löschen …", lambda: self.delete_folders(key, [folder], folder))]
+            below = self.folders_below(node)
+            if len(below) > 1:
+                entries.append(("Ordner mit allen Unterordnern aus Archiv löschen …",
+                                lambda: self.delete_folders(key, below, f"{folder} mit Unterordnern")))
+        self.popup(event, entries)
+
+    def folders_below(self, node):
+        folders = [self.folder_nodes[node][1]]
+        for child in self.folder_tree.get_children(node):
+            folders.extend(self.folders_below(child))
+        return folders
+
+    def delete_folders(self, key, folders, label):
+        if self.busy:
+            messagebox.showinfo("Löschen", "Bitte warte, bis der laufende Abruf beendet ist.", parent=self.root)
+            return
+        count = count_mails(self.path, key, folders)
+        if self.confirm_delete("Ordner löschen", f"Die Mails im Ordner „{self.folder_label(label)}“", count):
+            self.run_delete(lambda: delete_folder_mails(self.path, key, folders))
+
+    def delete_whole_account(self, key, account):
+        if self.busy:
+            messagebox.showinfo("Löschen", "Bitte warte, bis der laufende Abruf beendet ist.", parent=self.root)
+            return
+        name = account.label if account else "Dieses Konto"
+        if self.confirm_delete("Konto löschen",
+                               f"Das Konto {name} mit gespeichertem Passwort, Ordnerauswahl, Zeitraum und allen "
+                               f"Mails", count_mails(self.path, key)):
+            self.run_delete(lambda: delete_account(self.path, key))
+
+    def run_delete(self, action):
+        try:
+            deleted = action()
+        except (OSError, sqlite3.Error) as error:
+            messagebox.showerror("Löschen fehlgeschlagen", str(error), parent=self.root)
+            return
+        self.preview_id = None
+        self.reload_accounts(self.account_id if self.account_id in saved_accounts(self.path) else None)
+        self.refresh()
+        self.status.set(f"{deleted} Mail{'' if deleted == 1 else 's'} aus dem lokalen Archiv gelöscht")
+
+    # --- Updates (from SuperPyBackup: GitHub releases, signature, SHA-256, smoke test, rollback) ---------------
+
+    def build_updates(self, parent):
+        frame = ttk.LabelFrame(parent, text=" Updates ", padding=10)
+        self.update_choice = tk.BooleanVar(value=self.settings["check_updates"])
+        ttk.Checkbutton(frame, variable=self.update_choice, command=self.change_update_check,
+                        text="Beim Start und alle 12 Stunden auf neue Versionen prüfen").pack(anchor="w")
+        self.update_info = ttk.Label(frame, style="Muted.TLabel", justify="left",
+                                     text=f"Installiert: {VERSION_TEXT}")
+        self.update_info.pack(anchor="w", fill="x", pady=(4, 6))
+        self.update_info.bind("<Configure>", lambda event: self.update_info.configure(wraplength=event.width))
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="w")
+        self.update_check_button = ttk.Button(buttons, text="Jetzt prüfen", command=lambda: self.check_updates(True))
+        self.update_check_button.pack(side="left")
+        self.update_install_button = ttk.Button(buttons, text="Update installieren …", state="disabled",
+                                                command=self.install_update)
+        self.update_install_button.pack(side="left", padx=(6, 0))
+        self.rollback_button = ttk.Button(buttons, text="Vorversion wiederherstellen", command=self.rollback_update)
+        folder = updater.installed_dir()
+        if folder and any(Path(folder, name + ".old").is_file() for name in updater.ASSETS):
+            self.rollback_button.pack(side="left", padx=(6, 0))
+        self.available_update = None
+        self.update_running = False
+        return frame
+
+    def change_update_check(self):
+        self.save_setting("check_updates", self.update_choice.get())
+        if self.update_choice.get():
+            self.check_updates()
+
+    def scheduled_update_check(self):
+        """At program start and every 12 hours afterwards."""
+        if self.settings["check_updates"]:
+            self.check_updates()
+        self.root.after(updater.CHECK_INTERVAL_HOURS * 3600 * 1000, self.scheduled_update_check)
+
+    def check_updates(self, manual=False):
+        """Ask GitHub for a newer release in the background; downloads nothing."""
+        if self.update_running:
+            return
+        self.update_running = True
+        self.update_check_button.configure(state="disabled")
+        if manual:
+            self.update_info.configure(text="Prüfe auf neue Versionen …")
+
+        def work():
+            try:
+                self.events.put(("update_check", (manual, updater.check_for_update(), None)))
+            except updater.UpdateError as error:
+                self.events.put(("update_check", (manual, None, str(error))))
+            except Exception as error:  # Never disturb the program because of an update check.
+                self.events.put(("update_check", (manual, None, str(error) or type(error).__name__)))
+
+        threading.Thread(target=work, daemon=True, name="Updateprüfung").start()
+
+    def update_checked(self, manual, info, error):
+        self.update_running = False
+        self.update_check_button.configure(state="normal")
+        if error:
+            self.update_info.configure(text=f"Installiert: {VERSION_TEXT} · Prüfung nicht möglich: {error}")
+            if manual:
+                messagebox.showerror("Updates", f"Die Prüfung auf neue Versionen war nicht möglich.\n{error}",
+                                     parent=self.root)
+            return
+        self.available_update = info
+        if info is None:
+            self.update_info.configure(text=f"Installiert: {VERSION_TEXT} · Das ist die neueste Version.")
+            self.update_install_button.configure(state="disabled")
+            return
+        self.update_info.configure(text=f"Installiert: {VERSION_TEXT} · Neue Version verfügbar: {info.version}")
+        self.update_install_button.configure(state="normal")
+        if info.forced and updater.installed_dir():
+            self.run_update(info, forced=True)
+            return
+        if manual or not updater.already_notified(self.path.parent, info.version):
+            updater.remember_notified(self.path.parent, info.version)
+            self.status.set(f"Neue Version {info.version} verfügbar · Einstellungen → Update installieren")
+            if self.root.state() == "withdrawn":
+                self.tray.balloon(f"{APP_NAME} {info.version} verfügbar",
+                                  "Installieren unter Einstellungen → Updates.")
+
+    def install_update(self):
+        info = self.available_update
+        if info is None:
+            return
+        if not updater.installed_dir():
+            messagebox.showinfo("Update", "Updates lassen sich nur in der installierten EXE-Version einspielen.",
+                                parent=self.root)
+            return
+        if messagebox.askyesno(
+                "Update installieren",
+                f"Version {info.version} jetzt herunterladen, prüfen und installieren?\n\n"
+                "Installiert wird nur, wenn Signatur und Prüfsummen stimmen. Die bisherige Version bleibt als "
+                "Vorversion erhalten.", parent=self.root):
+            self.run_update(info)
+
+    def run_update(self, info, forced=False):
+        if self.update_running:
+            return
+        self.update_running = True
+        for button in (self.update_check_button, self.update_install_button):
+            button.configure(state="disabled")
+        self.update_info.configure(text=(f"Pflichtupdate: Version {VERSION_TEXT} ist {info.behind} Versionen alt. "
+                                         if forced else "") + f"Version {info.version} wird installiert …")
+
+        def work():
+            try:
+                updater.install_update(info, updater.installed_dir())
+                self.events.put(("update_installed", (info, forced, None)))
+            except Exception as error:
+                self.events.put(("update_installed", (info, forced, str(error) or type(error).__name__)))
+
+        threading.Thread(target=work, daemon=True, name="Update").start()
+
+    def update_installed(self, info, forced, error):
+        self.update_running = False
+        self.update_check_button.configure(state="normal")
+        if error:
+            self.update_install_button.configure(state="normal")
+            self.update_info.configure(text=f"Update nicht installiert (bisherige Version unverändert): {error}")
+            messagebox.showerror("Update", f"Das Update wurde nicht installiert. Die bisherige Version bleibt "
+                                           f"unverändert.\n\n{error}", parent=self.root)
+            return
+        self.available_update = None
+        self.update_info.configure(text=f"Version {info.version} installiert. Wird nach einem Neustart aktiv.")
+        self.rollback_button.pack(side="left", padx=(6, 0))
+        if self.root.state() == "withdrawn":
+            self.show_window()
+        title = "Pflichtupdate installiert" if forced else "Update installiert"
+        if messagebox.askyesno(title, f"{APP_NAME} {info.version} ist installiert. Jetzt neu starten?",
+                               parent=self.root):
+            self.restart()
+
+    def rollback_update(self):
+        folder = updater.installed_dir()
+        if not folder or not messagebox.askyesno(
+                "Vorversion wiederherstellen", "Die Version vor dem letzten Update wiederherstellen? Danach startet "
+                f"{APP_NAME} neu.", parent=self.root):
+            return
+        try:
+            updater.rollback(folder)
+        except (updater.UpdateError, OSError) as error:
+            messagebox.showerror("Vorversion", str(error), parent=self.root)
+            return
+        self.restart()
+
+    def restart(self):
+        """Start the (new) program shortly after this one has ended (only one instance may run)."""
+        program = sys.executable
+        if self.quit():
+            subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{program}"',
+                             creationflags=0x08000000)  # No console window.
 
     def change_tray(self):
         enabled = self.tray_choice.get()
@@ -242,6 +647,277 @@ class MailArchive:
             self.autostart_note.pack_forget()
             self.autostart_fix.pack_forget()
 
+    PERIOD_CHOICES = (("", "Unbegrenzt"), ("today", "Heute"), ("yesterday", "Gestern"),
+                      ("week", "Vor 1 Woche"), ("month", "Monat/Jahr"))
+    MONTH_NAMES = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September",
+                   "Oktober", "November", "Dezember")
+
+    def build_period(self, page):
+        frame = ttk.LabelFrame(page, text=" Zeitraum für die Archivierung ", padding=10)
+        self.period_widgets = {}
+        this_year = date.today().year
+        years = [str(year) for year in range(this_year, this_year - 40, -1)]
+        for column, (side, label) in enumerate((("from", "Von"), ("to", "Bis"))):
+            row = ttk.Frame(frame)
+            row.grid(row=0, column=column, sticky="w", padx=(0, 24))
+            ttk.Label(row, text=label, width=4).pack(side="left")
+            kind = ttk.Combobox(row, state="readonly", width=13, values=[name for _, name in self.PERIOD_CHOICES])
+            month = ttk.Combobox(row, state="readonly", width=10, values=self.MONTH_NAMES)
+            year = ttk.Combobox(row, state="readonly", width=6, values=years)
+            for widget in (kind, month, year):
+                widget.pack(side="left", padx=(0, 4))
+                widget.bind("<<ComboboxSelected>>", lambda _: self.change_period())
+            self.period_widgets[side] = (kind, month, year)
+        self.period_info = ttk.Label(frame, style="Muted.TLabel")
+        self.period_info.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.skip_deleted = tk.BooleanVar(value=True)
+        self.skip_deleted_button = ttk.Checkbutton(
+            frame, variable=self.skip_deleted, command=self.change_skip_deleted,
+            text="Als gelöscht markierte Mails nicht archivieren (vom Mailprogramm ausgeblendet, aber noch "
+                 "auf dem Server)")
+        self.skip_deleted_button.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        return frame
+
+    def change_skip_deleted(self):
+        if self.account_id is None:
+            return
+        try:
+            set_skip_deleted(self.path, self.account_id, self.skip_deleted.get())
+        except (OSError, sqlite3.Error) as error:
+            messagebox.showerror("Gelöschte Mails", str(error), parent=self.root)
+
+    def period_spec(self, side):
+        kind, month, year = self.period_widgets[side]
+        choice = self.PERIOD_CHOICES[kind.current()][0] if kind.current() >= 0 else ""
+        if choice != "month":
+            return choice
+        return f"{int(year.get()):04d}-{month.current() + 1:02d}"
+
+    def show_period(self):
+        """Show the archive period of the selected account."""
+        saved = get_period(self.path, self.account_id) if self.account_id is not None else ("", "")
+        today = date.today()
+        for side, spec in zip(("from", "to"), saved):
+            kind, month, year = self.period_widgets[side]
+            keys = [key for key, _ in self.PERIOD_CHOICES]
+            if spec in keys:
+                kind.current(keys.index(spec))
+                month.current(today.month - 1)
+                year.set(str(today.year))
+            else:
+                kind.current(keys.index("month"))
+                month.current(int(spec[5:7]) - 1)
+                year.set(spec[:4])
+        self.skip_deleted.set(get_skip_deleted(self.path, self.account_id) if self.account_id is not None else True)
+        self.skip_deleted_button.configure(state="normal" if self.account_id is not None else "disabled")
+        self.update_period_widgets()
+
+    def update_period_widgets(self):
+        saved = self.account_id is not None
+        for kind, month, year in self.period_widgets.values():
+            kind.configure(state="readonly" if saved else "disabled")
+            by_month = saved and self.PERIOD_CHOICES[kind.current()][0] == "month"
+            for widget in (month, year):
+                widget.configure(state="readonly" if by_month else "disabled")
+        try:
+            start, end = resolve_period(self.period_spec("from"), self.period_spec("to"))
+        except ValueError as error:
+            self.period_info.configure(text=str(error))
+            return
+        if not saved:
+            text = ""
+        elif not start and not end:
+            text = "Alle Mails werden archiviert, unabhängig vom Datum."
+        else:
+            if start and end:
+                period = f"vom {start:%d.%m.%Y} bis {end:%d.%m.%Y}"
+            elif start:
+                period = f"ab dem {start:%d.%m.%Y}"
+            else:
+                period = f"bis einschließlich {end:%d.%m.%Y}"
+            text = (f"Archiviert werden Mails {period}. Maßgeblich ist das Eingangsdatum auf dem Server. "
+                    "Bereits gesicherte Mails bleiben erhalten.")
+        self.period_info.configure(text=text)
+
+    def change_period(self):
+        if self.account_id is None:
+            return
+        try:
+            set_period(self.path, self.account_id, self.period_spec("from"), self.period_spec("to"))
+        except (ValueError, OSError, sqlite3.Error) as error:
+            messagebox.showwarning("Zeitraum", str(error), parent=self.root)
+            self.show_period()
+            return
+        self.update_period_widgets()
+
+    def build_folder_choice(self, parent):
+        frame = ttk.LabelFrame(parent, text=" Zu archivierende Ordner ", padding=8)
+        bar = ttk.Frame(frame)
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.load_folders_button = ttk.Button(bar, text="Ordnerliste vom Server laden",
+                                              command=self.load_server_folders)
+        self.load_folders_button.pack(side="left")
+        # Start with a wrap width so the long hint does not claim the space of the account list.
+        self.folder_hint = ttk.Label(frame, style="Muted.TLabel", justify="left", wraplength=280)
+        self.folder_hint.pack(side="bottom", fill="x", pady=(6, 0))
+        self.folder_hint.bind("<Configure>", lambda event: self.folder_hint.configure(wraplength=event.width))
+        self.folder_choice = ttk.Treeview(frame, columns=("server", "deleted", "archived"), show="tree headings",
+                                          selectmode="browse", height=6)
+        self.folder_choice.heading("#0", text="Ordner", anchor="w")
+        self.folder_choice.column("#0", width=200, minwidth=120)
+        for column, title, width in (("server", "Auf Server", 85), ("deleted", "Gelöscht markiert", 120),
+                                     ("archived", "Archiviert", 85)):
+            self.folder_choice.heading(column, text=title, anchor="e")
+            self.folder_choice.column(column, width=width, minwidth=70, anchor="e", stretch=False)
+        scroll = ttk.Scrollbar(frame, command=self.folder_choice.yview)
+        self.folder_choice.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.folder_choice.pack(fill="both", expand=True)
+        self.folder_choice.bind("<Button-1>", self.click_folder_choice)
+        self.folder_choice.bind("<space>", lambda _: self.toggle_folder(self.folder_choice.focus()))
+        self.folder_choice.bind("<Button-3>", self.folder_menu)
+        self.choice_paths = {}
+        self.choice_state = {}
+        self.loading_folders = False
+        return frame
+
+    def show_account_folders(self):
+        """Fill the checkbox tree with the folders of the selected account."""
+        tree = self.folder_choice
+        opened = {self.choice_paths[node] for node in self.choice_paths if tree.item(node, "open")}
+        tree.delete(*tree.get_children())
+        self.choice_paths, self.choice_state, self.choice_labels = {}, {}, {}
+        folders = account_folders(self.path, self.account_id) if self.account_id is not None else []
+        created = {}
+        for name, delimiter, role, chosen, count, on_server, deleted in folders:
+            self.choice_state[name] = chosen
+            parts = name.split(delimiter) if delimiter else [name]
+            parent = ""
+            for depth in range(1, len(parts) + 1):
+                path = (delimiter or "").join(parts[:depth])
+                if path not in created:
+                    # Intermediate nodes (e.g. "[Gmail]") may not be folders themselves.
+                    created[path] = node = f"c{len(created)}"
+                    self.choice_paths[node] = path
+                    self.choice_labels[node] = (parts[depth - 1], None, None, None)
+                    tree.insert(parent, "end", iid=node, open=path in opened or not opened)
+                parent = created[path]
+            self.choice_labels[parent] = ("Posteingang" if role == "inbox" else parts[-1], count, on_server, deleted)
+        self.update_folder_marks()
+        if self.account_id is None:
+            hint = ""
+        elif not folders:
+            hint = ("Noch keine Ordnerliste. Lade sie vom Server, um Ordner vor dem ersten Abruf auszuwählen. "
+                    "Ohne Auswahl werden alle Ordner außer Spam und Papierkorb archiviert.")
+        else:
+            hint = ("Angehakte Ordner werden beim nächsten Abruf archiviert. Ein Klick schaltet nur diesen Ordner, "
+                    "ein Rechtsklick bietet an, alle Unterordner mitzuschalten. Abgewählte Ordner behalten ihre "
+                    "bereits gesicherten Mails. Spam und Papierkorb sind anfangs abgewählt.")
+        self.folder_hint.configure(text=hint)
+
+    def folder_names_below(self, node):
+        """Real folders at and below a tree node."""
+        names = [self.choice_paths[node]] if self.choice_paths[node] in self.choice_state else []
+        for child in self.folder_choice.get_children(node):
+            names.extend(self.folder_names_below(child))
+        return names
+
+    def update_folder_marks(self):
+        for node, path in self.choice_paths.items():
+            label, count, on_server, deleted = self.choice_labels[node]
+            if path in self.choice_state:
+                # A real folder shows its own state; its subfolders have their own boxes.
+                mark = "☑" if self.choice_state[path] else "☐"
+            else:
+                states = {self.choice_state[name] for name in self.folder_names_below(node)}
+                mark = "☑" if states == {True} else "☐" if states == {False} else "◩"
+            real = path in self.choice_state
+            self.folder_choice.item(node, text=f"{mark}  {label}",
+                                    values=(self.number(on_server), self.number(deleted), self.number(count))
+                                    if real else ("", "", ""))
+
+    @staticmethod
+    def number(value):
+        """German thousands separator; a dash for an unknown count."""
+        return "–" if value is None else f"{value:,}".replace(",", ".")
+
+    def click_folder_choice(self, event):
+        node = self.folder_choice.identify_row(event.y)
+        if not node or "indicator" in self.folder_choice.identify_element(event.x, event.y):
+            return None
+        self.folder_choice.focus(node)
+        self.folder_choice.selection_set(node)
+        self.toggle_folder(node)
+        return "break"
+
+    def folder_menu(self, event):
+        node = self.folder_choice.identify_row(event.y)
+        if not node or self.account_id is None or len(self.folder_names_below(node)) < 2:
+            return
+        self.folder_choice.focus(node)
+        self.folder_choice.selection_set(node)
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Mit allen Unterordnern archivieren",
+                         command=lambda: self.choose_folders(self.folder_names_below(node), True))
+        menu.add_command(label="Mit allen Unterordnern nicht archivieren",
+                         command=lambda: self.choose_folders(self.folder_names_below(node), False))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def toggle_folder(self, node):
+        """Click: a real folder switches only itself, e.g. just the mails directly in the inbox.
+
+        A node that is no folder of its own (e.g. "[Gmail]") switches everything below it.
+        """
+        if not node or self.account_id is None:
+            return
+        path = self.choice_paths[node]
+        names = [path] if path in self.choice_state else self.folder_names_below(node)
+        if names:
+            self.choose_folders(names, not all(self.choice_state[name] for name in names))
+
+    def choose_folders(self, names, selected):
+        try:
+            set_folder_selection(self.path, self.account_id, names, selected)
+        except (OSError, sqlite3.Error) as error:
+            messagebox.showerror("Ordnerauswahl", str(error), parent=self.root)
+            return
+        for name in names:
+            self.choice_state[name] = selected
+        self.update_folder_marks()
+        self.reload_filters()
+
+    def account_and_password(self):
+        """Saved account of the form with the entered or saved password; raises ValueError."""
+        account = self.accounts[self.account_id]
+        if self.account_from_form() != account:
+            raise ValueError("Speichere zuerst die geänderten Kontodaten.")
+        return account, clean_password(self.password.get() or account_password(self.path, self.account_id) or "")
+
+    def load_server_folders(self):
+        if self.account_id is None or self.loading_folders:
+            return
+        try:
+            account, password = self.account_and_password()
+        except (ValueError, OSError, sqlite3.Error) as error:
+            messagebox.showwarning("Ordnerliste", str(error), parent=self.root)
+            return
+        self.loading_folders = True
+        self.update_account_buttons()
+        self.status.set(f"{account.user} · Ordnerliste wird geladen …")
+        key = self.account_id
+
+        def work():
+            try:
+                load_folders(self.path, account, password)
+                self.events.put(("folders", (key, None)))
+            except Exception as error:
+                self.events.put(("folders", (key, str(error) or type(error).__name__)))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def build_accounts(self):
         page = self.accounts_tab
         page.columnconfigure(0, weight=1)
@@ -251,12 +927,22 @@ class MailArchive:
         ttk.Button(buttons, text="Neues Konto", command=lambda: self.edit_account()).pack(side="left")
         self.remove_button = ttk.Button(buttons, text="Konto entfernen", command=self.delete_account)
         self.remove_button.pack(side="right")
-        listing = ttk.Frame(page)
-        listing.grid(row=1, column=0, sticky="nsew")
-        self.account_table = ttk.Treeview(listing, columns=("user", "server", "folder"),
+        top = ttk.Panedwindow(page, orient="horizontal")
+        top.grid(row=1, column=0, sticky="nsew")
+        listing = ttk.Frame(top, padding=(0, 0, 6, 0))
+        top.add(listing, weight=3)
+        top.add(self.build_folder_choice(top), weight=2)
+
+        def place_sash(event):
+            # Split once when the tab is first shown; afterwards the user's position is kept.
+            if event.width > 1 and not getattr(top, "placed", False):
+                top.placed = True
+                top.sashpos(0, event.width * 45 // 100)
+
+        top.bind("<Configure>", place_sash, add="+")
+        self.account_table = ttk.Treeview(listing, columns=("user", "server"),
                                          show="headings", selectmode="browse", height=5)
-        for key, title, width in (("user", "Benutzername", 250), ("server", "IMAP-Server", 235),
-                                  ("folder", "Ordner", 110)):
+        for key, title, width in (("user", "Benutzername", 170), ("server", "IMAP-Server", 150)):
             self.account_table.heading(key, text=title)
             self.account_table.column(key, width=width)
         scroll = ttk.Scrollbar(listing, command=self.account_table.yview)
@@ -270,7 +956,7 @@ class MailArchive:
         self.values = {}
         for index, (key, label, width) in enumerate((
             ("host", "Server", 20), ("port", "TLS-Port", 7),
-            ("user", "Benutzername", 25), ("folder", "Ordner", 15),
+            ("user", "Benutzername", 25),
         )):
             var = self.values[key] = tk.StringVar()
             ttk.Label(form, text=label).grid(row=0, column=index, sticky="w", padx=3)
@@ -279,10 +965,11 @@ class MailArchive:
             form.columnconfigure(index, weight=0 if key == "port" else 1)
             if key == "host":
                 self.host_entry = entry
-        ttk.Button(form, text="Konto speichern", command=self.store_account).grid(row=1, column=4, padx=(8, 0))
+        ttk.Button(form, text="Konto speichern", command=self.store_account).grid(row=1, column=3, padx=(8, 0))
 
+        self.build_period(page).grid(row=3, column=0, sticky="ew", pady=(9, 0))
         fetch = ttk.LabelFrame(page, text=" Abruf für das ausgewählte Konto ", padding=10)
-        fetch.grid(row=3, column=0, sticky="ew", pady=(9, 0))
+        fetch.grid(row=4, column=0, sticky="ew", pady=(9, 0))
         self.password = tk.StringVar()
         credentials = ttk.Frame(fetch)
         credentials.pack(fill="x")
@@ -306,18 +993,53 @@ class MailArchive:
         self.has_password = False
 
     def current_filter(self):
-        index = self.account_filter.current()
-        return self.filters[index - 1] if index > 0 else None
+        """(account_id, folder) of the selected tree node; None values mean no restriction."""
+        selected = self.folder_tree.selection()
+        return self.folder_nodes.get(selected[0], (None, None)) if selected else (None, None)
+
+    def select_folder(self):
+        # Rebuilding the tree also fires the selection event; only react to real changes.
+        if self.current_filter() != getattr(self, "active_filter", None):
+            self.active_filter = self.current_filter()
+            self.set_filter()
 
     def set_filter(self):
         self.offset = 0
         self.refresh()
 
     def reload_filters(self):
+        """Rebuild the folder tree: all accounts → account → folders (nested by the server's delimiter)."""
         current = self.current_filter()
-        self.filters = archived_accounts(self.path)
-        self.account_filter.configure(values=["Alle Konten", *(item.label for item in self.filters)])
-        self.account_filter.current(self.filters.index(current) + 1 if current in self.filters else 0)
+        tree = self.folder_tree
+        opened = {self.folder_nodes.get(node) for node in self.folder_nodes if tree.item(node, "open")}
+        tree.delete(*tree.get_children())
+        self.folder_nodes = {"all": (None, None)}
+        tree.insert("", "end", iid="all", text="Alle Konten", open=True)
+        for key, account, folders in folder_tree(self.path):
+            account_node = f"a{key}"
+            self.folder_nodes[account_node] = (key, None)
+            tree.insert("all", "end", iid=account_node, text=f"{account.user} · {account.host}",
+                        open=(key, None) in opened or not opened)
+            created = {}
+            for name, delimiter, role, count in folders:
+                parts = name.split(delimiter) if delimiter else [name]
+                parent = account_node
+                for depth in range(1, len(parts) + 1):
+                    path = (delimiter or "").join(parts[:depth])
+                    if path not in created:
+                        node = f"f{len(self.folder_nodes)}"
+                        created[path] = node
+                        self.folder_nodes[node] = (key, path)
+                        tree.insert(parent, "end", iid=node, text=parts[depth - 1],
+                                    open=(key, path) in opened)
+                    parent = created[path]
+                # Servers name their folders themselves (e.g. "Gesendet"); only INBOX gets a German label.
+                label = "Posteingang" if role == "inbox" else parts[-1]
+                tree.item(parent, text=f"{label} ({count})" if count else label)
+        selection = next((node for node, value in self.folder_nodes.items() if value == current), "all")
+        tree.selection_set(selection)
+        tree.see(selection)
+        self.active_filter = self.folder_nodes[selection]
 
     def reload_accounts(self, select=None):
         self.reload_filters()
@@ -325,7 +1047,7 @@ class MailArchive:
         self.account_table.delete(*self.account_table.get_children())
         for key, account in self.accounts.items():
             self.account_table.insert("", "end", iid=str(key),
-                                      values=(account.user, f"{account.host}:{account.port}", account.folder))
+                                      values=(account.user, f"{account.host}:{account.port}"))
         if select in self.accounts:
             self.account_table.selection_set(str(select))
         self.edit_account(select if select in self.accounts else None, focus=False)
@@ -339,12 +1061,14 @@ class MailArchive:
         self.account_id = key
         if key is None:
             self.account_table.selection_remove(*self.account_table.selection())
-        account = self.accounts.get(key, Account("", 993, "", "INBOX"))
+        account = self.accounts.get(key, Account("", 993, ""))
         for name, value in vars(account).items():
             self.values[name].set(value)
         self.password.set("")
         self.has_password = key is not None and account_password(self.path, key) is not None
         self.update_account_buttons()
+        self.show_account_folders()
+        self.show_period()
         if focus:
             self.host_entry.focus_set()
 
@@ -352,6 +1076,7 @@ class MailArchive:
         saved = self.account_id is not None
         self.remove_button.configure(state="normal" if saved else "disabled")
         self.sync_button.configure(state="normal" if saved and not self.busy else "disabled")
+        self.load_folders_button.configure(state="normal" if saved and not self.loading_folders else "disabled")
         self.store_password_button.configure(state="normal" if saved else "disabled")
         self.clear_password_button.configure(state="normal" if self.has_password else "disabled")
         self.password_status.configure(text="Passwort verschlüsselt gespeichert" if self.has_password else "")
@@ -373,22 +1098,22 @@ class MailArchive:
         self.update_account_buttons()
 
     def account_from_form(self):
-        host, port, user, folder = (self.values[k].get().strip() for k in ("host", "port", "user", "folder"))
-        if not re.fullmatch(r"[^\s/\\]+", host) or not user or not folder or not port.isascii() or not port.isdecimal():
-            raise ValueError("Bitte Server, TLS-Port, Benutzername und Ordner eingeben.")
-        if any(char in host + user + folder for char in "\r\n\0"):
-            raise ValueError("Server, Benutzername und Ordner müssen jeweils in einer Zeile stehen.")
+        host, port, user = (self.values[k].get().strip() for k in ("host", "port", "user"))
+        if not re.fullmatch(r"[^\s/\\]+", host) or not user or not port.isascii() or not port.isdecimal():
+            raise ValueError("Bitte Server, TLS-Port und Benutzername eingeben.")
+        if any(char in host + user for char in "\r\n\0"):
+            raise ValueError("Server und Benutzername müssen jeweils in einer Zeile stehen.")
         port = int(port)
         if not 1 <= port <= 65535:
             raise ValueError("Der TLS-Port muss zwischen 1 und 65535 liegen.")
-        return Account(host.lower(), port, user, "INBOX" if folder.upper() == "INBOX" else folder)
+        return Account(host.lower(), port, user)
 
     def store_account(self):
         try:
             account = self.account_from_form()
             key = save_account(self.path, account, self.account_id)
         except (OSError, ValueError, sqlite3.Error) as error:
-            text = "Dieses Konto mit diesem Ordner ist bereits eingerichtet." if isinstance(error, sqlite3.IntegrityError) else str(error)
+            text = "Dieses Konto ist bereits eingerichtet." if isinstance(error, sqlite3.IntegrityError) else str(error)
             messagebox.showerror("Konto speichern", text, parent=self.root)
             return
         self.reload_accounts(key)
@@ -433,13 +1158,111 @@ class MailArchive:
         self.offset += delta
         self.refresh()
 
+    COLUMNS = {"attach": ("📎", 46), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 85),
+               "time": ("Uhrzeit", 65), "size": ("Größe", 75)}
+    PAPERCLIP = "📎"
+
+    def sort_by(self, key):
+        """Click on a column heading: sort by it; a second click reverses the order."""
+        if self.settings["sort"] == key:
+            descending = not self.settings["sort_descending"]
+        else:
+            # Newest, largest and mails with attachments first; texts A–Z.
+            descending = key in ("date", "time", "attach", "size")
+        self.save_setting("sort", key)
+        self.save_setting("sort_descending", descending)
+        self.update_sort_headings()
+        self.offset = 0
+        self.refresh()
+
+    def background_work(self):
+        """First the search index (needed for fast searching), then the paperclips."""
+        while True:
+            try:
+                indexed, total = build_search_index(self.path)
+            except (OSError, sqlite3.Error):
+                time.sleep(5)  # E.g. database busy; try again later.
+                continue
+            self.events.put(("index_progress", (indexed, total)))
+            if indexed >= total:
+                break
+            time.sleep(0.05)
+        self.detect_attachments()
+
+    def pause_for_interface(self):
+        while self.foreground.is_set():
+            time.sleep(0.01)
+
+    def detect_attachments(self):
+        """Background: determine the paperclip for mails archived before 1.12.0.
+
+        Mails visible in the list come first, then all others from new to old, in small batches.
+        """
+        while True:
+            try:
+                visible = self.visible_unknown
+                self.visible_unknown = set()
+                batch = unknown_attachment_flags(self.path, mail_ids=visible) if visible else []
+                if not batch:
+                    batch = unknown_attachment_flags(self.path, 100)
+                if not batch:
+                    self.events.put(("attachment_progress", None))
+                    return
+                flags = {}
+                for mail_id, raw in batch:
+                    self.pause_for_interface()
+                    flags[mail_id] = has_attachments(raw)
+                store_attachment_flags(self.path, flags)
+                progress = attachment_progress(self.path)
+            except (OSError, sqlite3.Error):
+                time.sleep(5)  # E.g. database busy; try again later.
+                continue
+            self.events.put(("attachment_flags", {k: (v or 0) for k, v in flags.items()}))
+            self.events.put(("attachment_progress", progress))
+            time.sleep(0.02)  # Leave room for the user interface and running syncs.
+
+    def update_sort_headings(self):
+        for key, (label, _) in self.COLUMNS.items():
+            arrow = (" ▼" if self.settings["sort_descending"] else " ▲") if key == self.settings["sort"] else ""
+            self.table.heading(key, text=label + arrow)
+
+    @staticmethod
+    def size_label(size):
+        """Size of the original mail in B, KB or MB with a German decimal comma."""
+        if size is None:
+            return "—"
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.0f} KB"
+        return f"{size / 1024 / 1024:.1f} MB".replace(".", ",")
+
+    @staticmethod
+    def time_label(timestamp):
+        if not timestamp:
+            return "—"
+        try:
+            return datetime.fromtimestamp(timestamp).strftime("%H:%M")
+        except (ValueError, OverflowError, OSError):
+            return "—"
+
     def refresh(self):
         selected = self.table.selection()
-        rows = find_mails(self.path, self.query.get(), self.offset, PAGE + 1, self.current_filter())
+        self.foreground.set()
+        try:
+            rows = find_mails(self.path, self.query.get(), self.offset, PAGE + 1, *self.current_filter(),
+                              sort=self.settings["sort"], descending=self.settings["sort_descending"],
+                              sender=self.sender_filter)
+        finally:
+            self.foreground.clear()
         self.table.delete(*self.table.get_children())
+        # Let the background detection check the mails on this page first.
+        self.visible_unknown = {row["id"] for row in rows[:PAGE] if row["has_attachments"] is None}
         for row in rows[:PAGE]:
             self.table.insert("", "end", iid=str(row["id"]),
-                              values=(row["subject"] or "(Ohne Betreff)", row["sender"], self.date_label(row["sent"])))
+                              values=(self.PAPERCLIP if row["has_attachments"] else "",
+                                      row["subject"] or "(Ohne Betreff)", row["sender"], self.date_label(row["sent"]),
+                                      self.time_label(row["sent"]), self.size_label(row["size"])))
         count = min(len(rows), PAGE)
         self.page_label.configure(text=f"{self.offset + 1}–{self.offset + count}" if count else "Keine Treffer")
         self.prev.configure(state="normal" if self.offset else "disabled")
@@ -455,23 +1278,74 @@ class MailArchive:
         self.subject.configure(text=(row["subject"] or "(Ohne Betreff)") if row else "Mailvorschau")
         self.meta.configure(text=(
             f"Von: {row['sender'] or '—'}\nAn: {row['recipient'] or '—'}\n"
-            f"{self.date_label(row['sent'], True)}\n"
-            f"Konto: {row['user']} · {row['host']}:{row['port']} / {row['folder']}"
+            f"{self.date_label(row['sent'], True)} · {self.size_label(row['size'])}\n"
+            f"Konto: {row['user']} · {row['host']}:{row['port']} · Ordner: {self.folder_label(row['folder'])}"
         ) if row else "Wähle eine Nachricht aus der Liste.")
         self.mail_id.set(row["mail_id"] if row else "")
         self.copy_button.configure(state="normal" if row else "disabled")
-        self.body.configure(state="normal")
-        self.body.delete("1.0", "end")
-        if row:
-            self.body.insert("1.0", row["body"] or "(Kein Textinhalt. Das Original enthält auch etwaige Anhänge.)")
-        self.body.configure(state="disabled")
+        raw = get_mail(self.path, mail_id, raw=True)["raw"] if row else None
+        text = ((display_text(raw) if raw is not None else None) or row["body"]
+                or "(Kein Textinhalt. Das Original enthält auch etwaige Anhänge.)") if row else ""
+        self.show_body(text)
         self.export.configure(state="normal" if row else "disabled")
+        self.delete_button.configure(state="normal" if row else "disabled")
         if mail_id != self.preview_id:
             self.preview_id = mail_id
-            raw = get_mail(self.path, mail_id, raw=True)["raw"] if row else None
             count = self.attachments.show_mail(raw)
             self.preview_tabs.tab(self.attachments, text=f"Anhänge ({count})" if count else "Anhänge")
             self.preview_tabs.select(0)
+
+    # http(s) and mailto addresses, plus "www." without a scheme; trailing punctuation is not part of a link.
+    LINK_PATTERN = re.compile(r"(?:https?://|mailto:|www\.)[^\s<>\"'«»]+[^\s<>\"'«».,;:!?)\]}]", re.I)
+
+    def show_body(self, text):
+        """Show the message text; web and mail addresses become clickable links."""
+        body = self.body
+        body.configure(state="normal")
+        body.delete("1.0", "end")
+        for tag in body.tag_names():
+            if tag.startswith("link-"):
+                body.tag_delete(tag)
+        self.links = {}
+        position = 0
+        for match in self.LINK_PATTERN.finditer(text):
+            body.insert("end", text[position:match.start()])
+            url = match.group()
+            if url.lower().startswith("www."):
+                url = "http://" + url
+            tag = f"link-{len(self.links)}"
+            self.links[tag] = url
+            body.insert("end", match.group(), ("link", tag))
+            position = match.end()
+        body.insert("end", text[position:])
+        body.configure(state="disabled")
+
+    def link_at(self, event):
+        return next((self.links[tag] for tag in self.body.tag_names(f"@{event.x},{event.y}")
+                     if tag in self.links), None)
+
+    def hover_link(self, event):
+        url = self.link_at(event)
+        self.body.configure(cursor="hand2" if url else "")
+        if url != getattr(self, "hovered_link", None):
+            self.hovered_link = url
+            if url:
+                self.status_before_link = self.status.get()
+                self.status.set(f"Link öffnen: {url}")
+            elif getattr(self, "status_before_link", None) is not None:
+                # Restore the previous status unless something (e.g. a sync) has changed it meanwhile.
+                if self.status.get().startswith("Link öffnen: "):
+                    self.status.set(self.status_before_link)
+                self.status_before_link = None
+
+    def open_link(self, event):
+        url = self.link_at(event)
+        if url and re.match(r"(?:https?://|mailto:)", url, re.I):
+            try:
+                webbrowser.open(url)
+            except Exception as error:
+                messagebox.showerror("Link öffnen", f"Der Link konnte nicht geöffnet werden.\n{error}",
+                                     parent=self.root)
 
     def copy_mail_id(self):
         identifier = self.mail_id.get()
@@ -495,30 +1369,35 @@ class MailArchive:
     def start_sync(self):
         if self.busy or self.account_id is None:
             return
-        account = self.accounts[self.account_id]
         try:
-            if self.account_from_form() != account:
-                raise ValueError("Speichere zuerst die geänderten Kontodaten.")
-            password = clean_password(self.password.get() or account_password(self.path, self.account_id) or "")
+            account, password = self.account_and_password()
         except (ValueError, OSError, sqlite3.Error) as error:
             messagebox.showwarning("IMAP-Konto", str(error), parent=self.root)
             return
 
         self.password.set("")
-        self.busy = True
-        self.sync_user = account.user
+        self.run_sync([(account, password)], automatic=False)
+
+    def run_sync(self, jobs, automatic):
+        self.sync_auto = automatic
+        self.sync_user = jobs[0][0].user
         self.cancelled.clear()
-        self.update_account_buttons()
-        self.abort_button.configure(state="normal")
-        self.status.set(f"{account.user} · Verbindung zum IMAP-Server wird aufgebaut …")
+        self.set_sync_state(True)
 
         def work():
-            try:
-                result = sync(self.path, account, password,
-                              lambda done, total: self.events.put(("progress", (done, total))), self.cancelled)
-                self.events.put(("done", result))
-            except Exception as error:
-                self.events.put(("error", str(error) or type(error).__name__))
+            saved, missing, failed, errors = 0, 0, 0, []
+            for account, password in jobs:
+                if self.cancelled.is_set():
+                    break
+                self.events.put(("account", account.user))
+                try:
+                    result = sync(self.path, account, password,
+                                  lambda folder, done, total: self.events.put(("progress", (folder, done, total))),
+                                  self.cancelled)
+                    saved, missing, failed = saved + result[0], missing + result[1], failed + len(result[2])
+                except Exception as error:
+                    errors.append((account.user, str(error) or type(error).__name__))
+            self.events.put(("done", (saved, missing, failed, errors)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -536,25 +1415,95 @@ class MailArchive:
                 elif value == "quit" and self.quit():
                     return
                 continue
+            if event == "attachment_flags":
+                for mail_id, flag in value.items():
+                    if self.table.exists(str(mail_id)):
+                        self.table.set(str(mail_id), "attach", self.PAPERCLIP if flag else "")
+                continue
+            if event == "update_check":
+                self.update_checked(*value)
+                continue
+            if event == "update_installed":
+                self.update_installed(*value)
+                continue
+            if event == "index_progress":
+                indexed, total = value
+                if not self.busy and indexed < total:
+                    self.status.set(f"Suchindex wird aufgebaut: {self.number(indexed)} von {self.number(total)} "
+                                    "Mails (Suche bis dahin langsamer)")
+                elif not self.busy and self.status.get().startswith("Suchindex wird aufgebaut"):
+                    self.status.set("Suchindex bereit")
+                continue
+            if event == "attachment_progress":
+                # Only use the status line while nothing more important (a sync) is shown there.
+                if not self.busy and value is not None:
+                    known, total = value
+                    self.status.set(f"Anhänge werden erkannt: {self.number(known)} von {self.number(total)} Mails")
+                elif not self.busy and self.status.get().startswith("Anhänge werden erkannt"):
+                    self.status.set("Anhänge aller Mails erkannt")
+                continue
+            if event == "folders":
+                key, error = value
+                self.loading_folders = False
+                self.update_account_buttons()
+                if error:
+                    self.status.set("Ordnerliste konnte nicht geladen werden")
+                    messagebox.showerror("Ordnerliste", error, parent=self.root)
+                else:
+                    self.status.set("Ordnerliste geladen")
+                    if key == self.account_id:
+                        self.show_account_folders()
+                    self.reload_filters()
+                continue
+            if event == "account":
+                self.sync_user = value
+                if not self.cancelled.is_set():
+                    self.status.set(f"{value} · Verbindung zum IMAP-Server wird aufgebaut …")
+                continue
             if event == "progress":
                 if not self.cancelled.is_set():
-                    self.status.set(f"{self.sync_user} · {value[0]} von {value[1]} geprüft")
+                    folder, done, total = value
+                    self.status.set(f"{self.sync_user} · {self.folder_label(folder)} · {done} von {total} geprüft")
+                    if done % 500 == 0:
+                        # New folder (server numbers just stored) or progress: refresh the counts.
+                        self.show_account_folders()
                 continue
-            self.busy = False
-            self.update_account_buttons()
-            self.abort_button.configure(state="disabled")
-            self.reload_filters()
-            self.refresh()
-            if event == "error":
-                self.status.set("IMAP-Abruf fehlgeschlagen")
-                messagebox.showerror("IMAP-Abruf", value, parent=self.root)
-            else:
-                state = "Abruf gestoppt" if self.cancelled.is_set() else "Abruf abgeschlossen"
-                missing = f" · {value[1]} nicht verfügbar" if value[1] else ""
-                self.status.set(f"{self.sync_user} · {state} · {value[0]} neu gesichert{missing}")
-                if self.root.state() == "withdrawn":
-                    self.tray.balloon(APP_NAME, self.status.get())
+            self.finish_sync(*value)
+        if self.settings["interval"] and not self.busy and time.time() >= self.next_auto:
+            self.start_auto_sync()
+        self.update_next_label()
         self.root.after(100, self.poll)
+
+    def folder_label(self, folder):
+        return "Posteingang" if folder == "INBOX" else folder
+
+    def finish_sync(self, saved, missing, failed, errors):
+        if self.sync_auto:
+            self.next_auto = time.time() + self.settings["interval"] * 60
+        self.set_sync_state(False)
+        self.reload_filters()
+        self.show_account_folders()  # The sync also refreshed the folder list.
+        self.refresh()
+        who ="Automatischer Abruf" if self.sync_auto else self.sync_user
+        state = "Abruf gestoppt" if self.cancelled.is_set() else "Abruf abgeschlossen"
+        text = f"{who} · {state} · {saved} neu gesichert"
+        text += f" · {missing} nicht verfügbar" if missing else ""
+        text += f" · {failed} Ordner nicht lesbar" if failed else ""
+        text += f" · Fehler bei {len(errors)} Konto{'' if len(errors) == 1 else 'en'}" if errors else ""
+        if errors and not self.sync_auto:
+            self.status.set("IMAP-Abruf fehlgeschlagen")
+            messagebox.showerror("IMAP-Abruf", errors[0][1], parent=self.root)
+            return
+        self.status.set(text)
+        hidden = self.root.state() == "withdrawn"
+        if errors:
+            details = "\n".join(f"{user}: {message}" for user, message in errors)
+            if hidden:
+                self.tray.balloon("Automatischer Abruf fehlgeschlagen", details)
+            else:
+                self.status.set(f"{text} – {details.splitlines()[0]}")
+        elif hidden and (saved or not self.sync_auto):
+            self.tray.balloon(APP_NAME, text)
 
     def show_window(self):
         self.root.deiconify()
@@ -581,7 +1530,24 @@ class MailArchive:
         return True
 
 
+def print_version():
+    """Answer the updater's smoke test; a windowed EXE may have no sys.stdout, so write to the handle directly."""
+    text = f"{APP_NAME} {VERSION_TEXT}\n"
+    if sys.stdout is not None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+    import ctypes
+    handle = ctypes.windll.kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+    data = text.encode("utf-8")
+    written = ctypes.c_ulong()
+    ctypes.windll.kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+
+
 if __name__ == "__main__":
+    if "--version" in sys.argv[1:]:
+        print_version()
+        sys.exit(0)
     if signal_running_instance():
         sys.exit(0)
     root = tk.Tk()

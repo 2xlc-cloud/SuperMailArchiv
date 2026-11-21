@@ -101,8 +101,11 @@ class TrayIcon:
         self.ready = threading.Event()
         self.procedure = WNDPROC(self.window_procedure)  # Keep a reference for the lifetime of the window.
         size = user32.GetSystemMetrics(49) or 16  # SM_CXSMICON
-        data = png_icon(size)
-        self.icon = user32.CreateIconFromResourceEx(data, len(data), True, 0x00030000, size, size, 0)
+        self.icons = {}
+        for color in ("blue", "orange"):
+            data = png_icon(size, color)
+            self.icons[color] = user32.CreateIconFromResourceEx(data, len(data), True, 0x00030000, size, size, 0)
+        self.icon = self.icons["blue"]
         threading.Thread(target=self.run, name="TrayIcon", daemon=True).start()
         self.ready.wait(5)
 
@@ -140,6 +143,13 @@ class TrayIcon:
             self.tooltip = text
             if self.visible:
                 shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.data(NIF_TIP)))
+
+    def set_busy(self, busy):
+        """Show the orange icon while mails are being fetched."""
+        with self.lock:
+            self.icon = self.icons["orange" if busy else "blue"]
+            if self.visible:
+                shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.data(NIF_ICON)))
 
     def balloon(self, title, text):
         with self.lock:
@@ -187,8 +197,9 @@ class TrayIcon:
             self.set_visible(self.want_visible)
             return 0
         if message == WM_DESTROY:
-            if self.icon:
-                user32.DestroyIcon(self.icon)
+            for icon in self.icons.values():
+                if icon:
+                    user32.DestroyIcon(icon)
             user32.PostQuitMessage(0)
             return 0
         return user32.DefWindowProcW(hwnd, message, wparam, lparam)

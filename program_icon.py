@@ -19,24 +19,33 @@ def near_segment(x, y, start, end, radius):
     return (x - start[0] - fraction * dx) ** 2 + (y - start[1] - fraction * dy) ** 2 <= radius ** 2
 
 
-def icon_color(x, y):
+# Blue is the normal icon; orange marks a running mail sync.
+COLORS = {
+    "blue": {"flap": (26, 93, 196), "fold": (160, 197, 248), "shadow": (17, 66, 155),
+             "top": (50, 134, 246), "bottom": (14, 69, 184)},
+    "orange": {"flap": (204, 98, 0), "fold": (252, 204, 150), "shadow": (168, 72, 0),
+               "top": (255, 168, 38), "bottom": (226, 102, 0)},
+}
+
+
+def icon_color(x, y, colors=COLORS["blue"]):
     if not inside_rounded(x, y, 1, 1, 31, 31, 7):
         return None
     if inside_rounded(x, y, 5.5, 8.5, 26.5, 23.5, 2.5):
         if (near_segment(x, y, (6, 9.5), (16, 17.4), 0.8)
                 or near_segment(x, y, (16, 17.4), (26, 9.5), 0.8)):
-            return (26, 93, 196)
+            return colors["flap"]
         if (near_segment(x, y, (6.5, 23), (12.5, 17.5), 0.55)
                 or near_segment(x, y, (25.5, 23), (19.5, 17.5), 0.55)):
-            return (160, 197, 248)
+            return colors["fold"]
         return (255, 255, 255)
     if inside_rounded(x, y, 5.5, 9.6, 26.5, 24.6, 2.5):
-        return (17, 66, 155)
+        return colors["shadow"]
     fraction = (y - 1) / 30
-    return (round(50 - 36 * fraction), round(134 - 65 * fraction), round(246 - 62 * fraction))
+    return tuple(round(top + (bottom - top) * fraction) for top, bottom in zip(colors["top"], colors["bottom"]))
 
 
-def png_icon(size):
+def png_icon(size, color="blue"):
     samples = 3 if size <= 64 else 2
     unit = 32 / size
     rows = bytearray()
@@ -45,7 +54,7 @@ def png_icon(size):
         for column in range(size):
             colors = [
                 icon_color((column + (dx + 0.5) / samples) * unit,
-                           (row + (dy + 0.5) / samples) * unit)
+                           (row + (dy + 0.5) / samples) * unit, COLORS[color])
                 for dy in range(samples) for dx in range(samples)
             ]
             visible = [color for color in colors if color is not None]

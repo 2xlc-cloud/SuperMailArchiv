@@ -52,6 +52,24 @@ def main():
         "--workpath", str(build / "work"), "--specpath", str(build),
         "--distpath", str(project / "dist"), str(project / "app.py"),
     ])
+    write_release_files(project / "dist")
+
+
+def write_release_files(dist):
+    """SHA256SUMS.txt (and its signature, if the signing key exists) for a GitHub release; see README."""
+    import hashlib
+
+    exe = dist / f"{APP_NAME}.exe"
+    sums = dist / "SHA256SUMS.txt"
+    sums.write_text(f"{hashlib.sha256(exe.read_bytes()).hexdigest()} *{exe.name}\n", encoding="utf-8")
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
+    import sign_release
+
+    if sign_release.key_path().exists():
+        print(f"Signiert: {sign_release.sign_file(sums)}")
+    else:
+        print(f"Kein Signaturschlüssel ({sign_release.key_path()}): {sums.name} ist nicht signiert; "
+              "Updates akzeptieren diese Release nicht.")
 
 
 if __name__ == "__main__":

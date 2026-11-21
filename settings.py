@@ -7,7 +7,10 @@ from pathlib import Path
 
 from app_info import APP_NAME
 
-DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True}
+DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True, "interval": 0, "developer": False,
+            "sort": "date", "sort_descending": True, "check_updates": True}
+# Automatic sync interval in minutes; 0 switches it off.
+INTERVALS = {0: "Aus", 10: "Alle 10 Minuten", 30: "Alle 30 Minuten", 60: "Jede Stunde", 120: "Alle 2 Stunden"}
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MINIMIZED_ARGUMENT = "--minimized"
 
@@ -28,6 +31,10 @@ class Settings:
                 self.values[key] = stored[key]
         if self.values["theme"] not in ("dark", "light"):
             self.values["theme"] = "dark"
+        if self.values["interval"] not in INTERVALS:
+            self.values["interval"] = 0
+        if self.values["sort"] not in ("attach", "subject", "sender", "date", "time", "size"):
+            self.values["sort"] = "date"
 
     def _legacy_theme(self):
         try:

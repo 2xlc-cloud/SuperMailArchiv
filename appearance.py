@@ -34,6 +34,8 @@ def apply_theme(root, name):
     style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
     style.configure("Preview.TLabel", font=("Segoe UI", 13, "bold"))
     style.configure("Muted.TLabel", foreground=palette["muted"])
+    style.configure("Developer.TLabel", foreground="#f59b1a" if name == "dark" else "#b35c00",
+                    font=("Segoe UI", 10, "bold"))
     style.configure("Status.TLabel", relief="sunken", padding=(8, 3))
     style.configure("TLabelframe", background=bg, bordercolor=border)
     style.configure("TLabelframe.Label", background=bg, foreground=accent, font=("Segoe UI", 9, "bold"))
