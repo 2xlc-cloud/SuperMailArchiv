@@ -212,7 +212,7 @@ def initialize(path):
         db.execute("BEGIN IMMEDIATE")
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version > 3:
-            raise ValueError("Diese Datenbank benötigt eine neuere Version von SuperMailArchiv.")
+            raise ValueError("Die Archivdatenbank benötigt eine neuere Programmversion.")
         if version < 2:
             _migrate(db, legacy_path, version)
             version = 2
@@ -221,7 +221,7 @@ def initialize(path):
             # Rewrite freed pages, then remove old WAL frames and the old settings file.
             db.execute("VACUUM")
             if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
-                raise OSError("Schließe andere SuperMailArchiv-Fenster, damit die Umstellung abgeschlossen werden kann.")
+                raise OSError("Schließe weitere Fenster der App, damit die Umstellung abgeschlossen werden kann.")
             legacy_path.unlink(missing_ok=True)
             db.execute("PRAGMA user_version=3")
 

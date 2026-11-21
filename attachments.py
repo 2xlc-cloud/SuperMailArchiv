@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from archive import attachments_from
+from appearance import style_native_widgets
 
 
 IMAGE_FORMATS = {"image/png", "image/gif"}
@@ -25,10 +26,9 @@ def safe_filename(name):
 
 
 class AttachmentPane(ttk.Frame):
-    def __init__(self, parent, background, foreground):
+    def __init__(self, parent, theme):
         super().__init__(parent, padding=8)
-        self.background = background
-        self.foreground = foreground
+        self.theme = theme
         self.items = []
         buttons = ttk.Frame(self)
         buttons.pack(side="bottom", fill="x", pady=(7, 0))
@@ -91,7 +91,6 @@ class AttachmentPane(ttk.Frame):
         window = tk.Toplevel(self)
         window.title(item.name)
         window.geometry("760x540")
-        window.configure(bg=self.background)
         window.transient(self.winfo_toplevel())
         if item.content_type == "text/plain":
             charset = item.part.get_content_charset() or ("utf-16" if data.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig")
@@ -101,8 +100,7 @@ class AttachmentPane(ttk.Frame):
                 content = data[:1_000_000].decode("utf-8", errors="replace")
             if len(data) > 1_000_000:
                 content += "\n\n[Vorschau gekürzt]"
-            text = tk.Text(window, wrap="word", background=self.background,
-                           foreground=self.foreground, padx=12, pady=10)
+            text = tk.Text(window, wrap="word", font=("Segoe UI", 10), padx=12, pady=10)
             scroll = ttk.Scrollbar(window, command=text.yview)
             text.configure(yscrollcommand=scroll.set)
             scroll.pack(side="right", fill="y")
@@ -131,6 +129,8 @@ class AttachmentPane(ttk.Frame):
             except (tk.TclError, ValueError) as error:
                 window.destroy()
                 messagebox.showerror("Anhangsvorschau", str(error), parent=self)
+                return
+        style_native_widgets(window, self.theme)
 
     def open_file(self):
         item = self.selected()
@@ -140,7 +140,7 @@ class AttachmentPane(ttk.Frame):
         if suffix not in OPEN_EXTENSIONS:
             return
         try:
-            folder = Path(tempfile.mkdtemp(prefix="SuperMailArchiv-"))
+            folder = Path(tempfile.mkdtemp(prefix="SuperMailBackup-"))
             destination = folder / ("Anhang" + suffix)
             destination.write_bytes(item.read())
             # Preserve the Internet origin of mail attachments for Windows and Office.

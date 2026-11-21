@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title SuperMailArchiv
+title SuperMailBackup
 where py >nul 2>nul
 if errorlevel 1 (
     python "%~dp0app.py"

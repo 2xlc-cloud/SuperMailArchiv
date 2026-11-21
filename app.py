@@ -8,16 +8,15 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from app_info import APP_NAME, VERSION_TEXT
 from archive import (Account, account_password, archived_accounts, clean_password, find_mails,
                      get_mail, initialize, remember_password, remove_account, save_account,
                      saved_accounts, sync)
+from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane
 
 
 DATA = Path(os.getenv("LOCALAPPDATA") or Path.home()) / "MailArchiv"
-APP_NAME = "SuperMailArchiv"
-BG, PANEL, FIELD = "#111622", "#171f2e", "#202a3b"
-FG, MUTED, ACCENT = "#ecf1fa", "#a9b8ce", "#315e9c"
 PAGE = 100
 
 
@@ -25,6 +24,8 @@ class MailArchive:
     def __init__(self, root, data):
         self.root = root
         self.path = data / "archiv.sqlite3"
+        self.theme_path = data / "darstellung.txt"
+        self.theme = self.load_theme()
         initialize(self.path)
         self.events = queue.Queue()
         self.cancelled = threading.Event()
@@ -35,50 +36,49 @@ class MailArchive:
         self.accounts = {}
         self.filters = []
         self.preview_id = None
-        root.title(APP_NAME)
+        root.title(f"{APP_NAME} {VERSION_TEXT}")
         root.geometry("1120x710")
         root.minsize(810, 500)
-        root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        self.style()
         self.build()
+        self.update_theme()
         accounts = saved_accounts(self.path)
         self.reload_accounts(next(iter(accounts)) if len(accounts) == 1 else None)
         self.refresh()
         root.after(100, self.poll)
 
-    def style(self):
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure(".", background=BG, foreground=FG, font=("Segoe UI", 10),
-                        bordercolor=FIELD, lightcolor=FIELD, darkcolor=FIELD, troughcolor=BG)
-        style.configure("TEntry", fieldbackground=FIELD, insertcolor=FG, padding=6)
-        style.map("TEntry", fieldbackground=[("readonly", FIELD)])
-        style.configure("TButton", background=FIELD, padding=(11, 7))
-        style.configure("Accent.TButton", background=ACCENT)
-        style.map("Accent.TButton", background=[("active", "#3c73ba")])
-        style.map("TButton", background=[("active", "#2d3d54")],
-                  foreground=[("disabled", MUTED)])
-        style.configure("TLabelframe.Label", foreground=MUTED)
-        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, rowheight=29)
-        style.configure("Treeview.Heading", background=FIELD, font=("Segoe UI", 9, "bold"))
-        style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", FG)])
-        style.map("Treeview.Heading", background=[("active", FIELD)])
-        style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("TNotebook.Tab", background=FIELD, padding=(13, 7))
-        style.map("TNotebook.Tab", background=[("selected", ACCENT), ("active", "#2d3d54")])
-        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)])
-        self.root.option_add("*TCombobox*Listbox.background", FIELD)
-        self.root.option_add("*TCombobox*Listbox.foreground", FG)
+    def load_theme(self):
+        try:
+            name = self.theme_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return "dark"
+        return name if name in PALETTES else "dark"
+
+    def update_theme(self):
+        apply_theme(self.root, self.theme)
+        self.attachments.theme = self.theme
+        self.theme_button.configure(text="Hell" if self.theme == "dark" else "Dunkel")
+
+    def toggle_theme(self):
+        self.theme = "light" if self.theme == "dark" else "dark"
+        self.update_theme()
+        try:
+            self.theme_path.write_text(self.theme + "\n", encoding="utf-8")
+        except OSError:
+            self.status.set("Die Darstellung konnte nicht für den nächsten Start gespeichert werden.")
 
     def build(self):
-        shell = ttk.Frame(self.root, padding=(19, 13))
-        shell.pack(fill="both", expand=True)
-        ttk.Label(shell, text=APP_NAME, font=("Segoe UI", 23, "bold")).pack(anchor="w", pady=(0, 9))
+        header = ttk.Frame(self.root, padding=(16, 12, 16, 4))
+        header.pack(fill="x")
+        ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
+        self.theme_button = ttk.Button(header, width=7, command=self.toggle_theme)
+        self.theme_button.pack(side="right")
         self.status = tk.StringVar(value="Bereit")
-        ttk.Label(shell, textvariable=self.status, style="Muted.TLabel").pack(side="bottom", anchor="w", pady=(8, 0))
-        self.tabs = ttk.Notebook(shell)
-        self.tabs.pack(fill="both", expand=True)
+        ttk.Label(self.root, textvariable=self.status, style="Status.TLabel", anchor="w").pack(
+            side="bottom", fill="x"
+        )
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.pack(fill="both", expand=True, padx=12, pady=6)
         outer = self.archive_tab = ttk.Frame(self.tabs, padding=12)
         self.accounts_tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(outer, text="Archiv")
@@ -128,7 +128,7 @@ class MailArchive:
         self.table.pack(fill="both", expand=True)
         self.table.bind("<<TreeviewSelect>>", self.show_selection)
 
-        self.subject = ttk.Label(preview, text="Mailvorschau", font=("Segoe UI", 16, "bold"))
+        self.subject = ttk.Label(preview, text="Mailvorschau", style="Preview.TLabel")
         self.subject.pack(fill="x")
         self.subject.bind("<Configure>", lambda event: self.subject.configure(wraplength=event.width))
         self.meta = ttk.Label(preview, style="Muted.TLabel", justify="left")
@@ -149,12 +149,11 @@ class MailArchive:
         self.preview_tabs = ttk.Notebook(preview)
         self.preview_tabs.pack(fill="both", expand=True)
         message = ttk.Frame(self.preview_tabs)
-        self.attachments = AttachmentPane(self.preview_tabs, PANEL, FG)
+        self.attachments = AttachmentPane(self.preview_tabs, self.theme)
         self.preview_tabs.add(message, text="Nachricht")
         self.preview_tabs.add(self.attachments, text="Anhänge")
-        self.body = tk.Text(message, wrap="word", bg=PANEL, fg=FG, selectbackground=ACCENT,
-                            font=("Segoe UI", 11), padx=13, pady=11, relief="flat",
-                            highlightthickness=0, width=36, state="disabled")
+        self.body = tk.Text(message, wrap="word", font=("Segoe UI", 10),
+                            padx=11, pady=9, width=36, state="disabled")
         scroll = ttk.Scrollbar(message, command=self.body.yview)
         self.body.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
