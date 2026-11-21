@@ -53,7 +53,11 @@ class AttachmentPane(ttk.Frame):
         self.show_mail(None)
 
     def show_mail(self, raw):
-        self.items = attachments_from(raw) if raw is not None else []
+        try:
+            self.items = attachments_from(raw) if raw is not None else []
+        except Exception:
+            # Malformed mails are archived too; their attachments stay available in the EML export.
+            self.items = []
         self.table.delete(*self.table.get_children())
         for index, item in enumerate(self.items):
             self.table.insert("", "end", iid=str(index), values=(item.name, item.content_type))

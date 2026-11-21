@@ -118,6 +118,14 @@ def parse_mail(raw, received):
     return header("From"), header("To"), header("Subject"), timestamp, body
 
 
+def safe_parse_mail(raw, received):
+    # Malformed mails are still archived; the original stays available as EML.
+    try:
+        return parse_mail(raw, received)
+    except Exception:
+        return "", "", "(Mail konnte nicht gelesen werden)", received, ""
+
+
 def connect(path):
     db = sqlite3.connect(path)
     db.execute("PRAGMA foreign_keys=ON")
@@ -342,17 +350,30 @@ def clean_password(password):
     return password
 
 
+def login(client, user, password):
+    try:
+        if user.isascii() and password.isascii():
+            client.login('"' + user.replace("\\", "\\\\").replace('"', '\\"') + '"', password)
+        elif "AUTH=PLAIN" in client.capabilities:
+            # LOGIN only accepts ASCII in imaplib; SASL PLAIN transmits UTF-8 (RFC 4616).
+            credentials = b"\0" + user.encode("utf-8") + b"\0" + password.encode("utf-8")
+            client.authenticate("PLAIN", lambda _: credentials)
+        else:
+            raise ValueError(
+                "Der Server unterstützt keine Anmeldung mit Umlauten oder Sonderzeichen in "
+                "Benutzername oder Passwort. Verwende ein App-Passwort ohne solche Zeichen."
+            )
+    except imaplib.IMAP4.error:
+        raise ValueError("Anmeldung fehlgeschlagen. Prüfe Benutzername und (App-)Passwort.") from None
+
+
 def sync(path, account, password, progress, cancelled):
     password = clean_password(password)
     if any(c in account.user for c in "\r\n\0"):
         raise ValueError("Der Benutzername enthält einen Zeilenumbruch oder ein Nullzeichen.")
     with imaplib.IMAP4_SSL(account.host, account.port, ssl_context=ssl.create_default_context(),
                           timeout=25) as client, closing(connect(path)) as db:
-        try:
-            user = '"' + account.user.replace("\\", "\\\\").replace('"', '\\"') + '"'
-            client.login(user, password)
-        except imaplib.IMAP4.error:
-            raise ValueError("Anmeldung fehlgeschlagen. Prüfe Benutzername und (App-)Passwort.") from None
+        login(client, account.user, password)
         status, _ = client.select(mailbox_argument(account.folder), readonly=True)
         if status != "OK":
             raise ValueError("Der IMAP-Ordner konnte nicht geöffnet werden.")
@@ -377,9 +398,18 @@ def sync(path, account, password, progress, cancelled):
         for index, uid in enumerate(pending, 1):
             if cancelled.is_set():
                 break
-            status, response = client.uid("FETCH", str(uid), "(UID INTERNALDATE BODY.PEEK[])")
+            try:
+                status, response = client.uid("FETCH", str(uid), "(UID INTERNALDATE BODY.PEEK[])")
+            except imaplib.IMAP4.abort:
+                raise  # The connection is gone; the next run continues with the remaining mails.
+            except imaplib.IMAP4.error:
+                status, response = "NO", []
             if status != "OK":
-                raise ValueError(f"Nachricht {uid} konnte nicht abgerufen werden. Gesicherte Mails bleiben erhalten.")
+                # Skip this mail so that one faulty message cannot block all older ones.
+                missing += 1
+                if index % 10 == 0 or index == len(pending):
+                    progress(index, len(pending))
+                continue
             for position, item in enumerate(response):
                 if not isinstance(item, tuple):
                     continue
@@ -402,7 +432,7 @@ def sync(path, account, password, progress, cancelled):
                            (mail_id,account_id,validity,uid,sender,recipient,subject,sent,body,raw)
                            VALUES (?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(account_id,validity,uid) DO NOTHING""",
-                        (str(uuid4()), *key, uid, *parse_mail(raw, received), raw)
+                        (str(uuid4()), *key, uid, *safe_parse_mail(raw, received), raw)
                     )
                 saved += cursor.rowcount
                 break
