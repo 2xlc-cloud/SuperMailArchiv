@@ -11,7 +11,7 @@ import webbrowser
 import tkinter as tk
 from datetime import date, datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from app_info import APP_NAME, VERSION_TEXT
 from archive import (Account, clean_password, display_text, has_attachments, resolve_period, sender_address,
@@ -203,9 +203,12 @@ class MailArchive(DatabaseTab):
             anchor = self.ANCHORS.get(key, "w")
             # Headings aligned like their values, so short columns do not look spread apart.
             self.table.heading(key, command=lambda key=key: self.sort_by(key), anchor=anchor)
-            self.table.column(key, width=width, minwidth=30 if key == "attach" else 46,
+            if key in self.SAMPLES:
+                width = self.fit_width(key)
+            self.table.column(key, width=width, minwidth=width if key in self.SAMPLES else 60,
                               stretch=key in ("subject", "sender"), anchor=anchor)
         self.update_sort_headings()
+        self.table.bind("<Configure>", self.fit_columns, add="+")
         scroll = ttk.Scrollbar(results, command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -1237,6 +1240,24 @@ class MailArchive(DatabaseTab):
     COLUMNS = {"attach": ("📎", 34), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 80),
                "time": ("Uhrzeit", 58), "size": ("Größe", 64), "spam": ("Spam", 54)}
     ANCHORS = {"attach": "center", "time": "center", "size": "e", "spam": "e"}
+    # Longest values of the short columns; their width is measured from these and the heading with its sort arrow.
+    SAMPLES = {"attach": ("📎",), "date": ("88.88.8888",), "time": ("88:88",), "size": ("888 KB", "88,8 MB"),
+               "spam": ("⚠ 88,8", "-88,8")}
+
+    def fit_columns(self, _event=None):
+        """Subject and sender share the space left by the short columns (60:40), so every column stays visible."""
+        fixed = sum(int(self.table.column(key, "width")) for key in self.COLUMNS if key not in ("subject", "sender"))
+        free = max(self.table.winfo_width() - fixed - 4, 120)
+        subject = int(free * 0.6)
+        self.table.column("subject", width=subject)
+        self.table.column("sender", width=free - subject)
+
+    def fit_width(self, key):
+        """Just wide enough for the column's values and heading (in screen pixels, so it follows the scaling)."""
+        text = tkfont.Font(root=self.root, family="Segoe UI", size=9)
+        label = self.COLUMNS[key][0]
+        needed = max([text.measure(sample) for sample in self.SAMPLES[key]] + [text.measure(label + " ▼")])
+        return needed + text.measure("000")  # Cell padding of the table plus a small gap to the next column.
     PAPERCLIP = "📎"
 
     def sort_by(self, key):
