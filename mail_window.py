@@ -10,7 +10,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from appearance import PALETTES, style_native_widgets
-from archive import display_text, get_mail
+from archive import display_text
 from attachments import AttachmentPane, write_temporary
 
 LINK_PATTERN = re.compile(r"(?:https?://|mailto:|www\.)[^\s<>\"'«»]+[^\s<>\"'«».,;:!?)\]}]", re.I)
@@ -117,11 +117,11 @@ class MailWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app = app
         self.mail_id = mail_id
-        row = get_mail(app.path, mail_id)
+        row = app.archive.get_mail(mail_id)
         if row is None:
             self.destroy()
             raise LookupError("Die Mail ist nicht mehr im Archiv.")
-        self.raw = get_mail(app.path, mail_id, raw=True)["raw"]
+        self.raw = app.archive.get_mail(mail_id, raw=True)["raw"]
         subject = row["subject"] or "(Ohne Betreff)"
         self.title(subject[:120])
         self.geometry(self.initial_geometry())
@@ -212,7 +212,7 @@ class MailWindow(tk.Toplevel):
 
     def save_original(self):
         destination = filedialog.asksaveasfilename(parent=self, defaultextension=".eml",
-                                                   initialfile=f"Mail-{self.mail_id}.eml",
+                                                   initialfile=f"Mail-{self.mail_id.replace(':', '-')}.eml",
                                                    filetypes=[("E-Mail", "*.eml")])
         if destination:
             try:

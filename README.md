@@ -47,7 +47,7 @@ Im Reiter **Einstellungen** lässt sich festlegen:
 - **Entwicklermodus:** Nach einer Rückfrage lassen sich archivierte Mails, Ordner und Konten aus dem lokalen Archiv löschen. Die App zeigt dann oben rechts „Entwicklermodus“ an. Gelöscht wird per Rechtsklick im Reiter **Archiv**, mit der Entf-Taste oder über **Aus Archiv löschen …**:
   - **Mails:** eine oder mehrere markierte Mails.
   - **Ordner:** die Mails eines Ordners, auf Wunsch mit allen Unterordnern. Die Ordnerauswahl bleibt erhalten.
-  - **Konto:** das Konto mit gespeichertem Passwort, Ordnerauswahl, Zeitraum und allen Mails.
+  - **Konto:** das Konto mit gespeichertem Passwort, Ordnerauswahl, Zeitraum und allen Mails; enthält seine Konto-Datei danach kein Konto mehr, wird die Datei gelöscht (ihr Inhalt wurde vorher überschrieben).
 
   Auf dem Mailserver wird nichts gelöscht. Liegen gelöschte Mails dort noch und passen sie zu Ordnerauswahl und Zeitraum, archiviert der nächste Abruf sie erneut. Gelöschte Inhalte werden in der Archivdatei überschrieben.
 
@@ -55,17 +55,25 @@ Ein erneuter Start der App öffnet das bereits laufende Fenster, statt eine zwei
 
 ## Datenbank
 
-Der Reiter **Datenbank** zeigt und pflegt die Archivdatei:
+Ab Version 1.18.0 hat jedes Konto eine eigene Datenbankdatei (`Konto-1.sqlite3`, `Konto-2.sqlite3` …) mit seinen Mails, Ordnerauswahl, Zeitraum, Suchindex und dem gespeicherten Passwort. Alle Konto-Dateien liegen zusammen in einem **Archivordner**. Liste, Sortierung und Suche fassen alle Konten wie bisher zusammen („Alle Konten“ im Ordnerbaum).
 
-- **Archivdatei:** Pfad der geöffneten Datei, **Im Explorer zeigen**, **Anderes Archiv öffnen …** (z. B. auf einem anderen Laufwerk), **Neues Archiv anlegen …** und **Standardarchiv verwenden**. Beim Wechsel startet die App neu. Konten, gespeicherte Passwörter, Ordnerauswahl und Zeitraum gehören zum jeweiligen Archiv. Fehlt das gewählte Archiv beim Start (etwa ein nicht angeschlossenes Laufwerk), fragt die App, ob sie stattdessen das Standardarchiv öffnen soll; sie legt dort nie stillschweigend ein leeres Archiv an.
-- **Übersicht:** Dateigröße, ungenutzter Platz, Anzahl Mails, Konten und Ordner, Zeitraum der Mails, Stand des Suchindex, freier Speicher und Format.
-- **Sicherung erstellen …:** Schreibt eine vollständige Kopie an einen frei wählbaren Ort. Die Kopie entsteht zuerst als `.teil`-Datei, wird geprüft und erst dann umbenannt; ein Abbruch hinterlässt keine halbe Sicherung.
-- **Sicherung wiederherstellen …:** Ersetzt das geöffnete Archiv nach einer Rückfrage durch eine Sicherung. Das geschieht beim Neustart, bevor die App das Archiv benutzt. Das bisherige Archiv bleibt daneben als `archiv-vor-Wiederherstellung <Datum>.sqlite3` erhalten. Gespeicherte Passwörter lassen sich nur unter demselben Windows-Benutzer entschlüsseln.
-- **Schnell prüfen / Vollständig prüfen:** Prüft die Datei (SQLite `quick_check` bzw. `integrity_check`), die Verweise zwischen Mails und Konten und den Suchindex.
-- **Komprimieren:** Schreibt die Datei neu und gibt ungenutzten Platz frei (VACUUM), z. B. nach dem Löschen im Entwicklermodus.
-- **Suchindex neu aufbauen:** Leert den Suchindex; die App baut ihn im Hintergrund neu auf.
+Der Reiter **Datenbank** zeigt und pflegt den Archivordner:
 
-Während eines Abrufs ist keine Sicherung oder Wartung möglich und umgekehrt; der automatische Abruf wartet. Prüfen, Komprimieren und Sichern lassen sich abbrechen; das Archiv bleibt dann unverändert.
+- **Archivordner:** Pfad des geöffneten Ordners, **Im Explorer zeigen**, **Anderen Archivordner öffnen …** (z. B. auf einem anderen Laufwerk), **Neuen Archivordner anlegen …** (leerer Ordner) und **Standardarchiv verwenden**. Beim Wechsel startet die App neu. Fehlt der gewählte Ordner beim Start (etwa ein nicht angeschlossenes Laufwerk), fragt die App, ob sie stattdessen das Standardarchiv öffnen soll; sie legt dort nie stillschweigend ein leeres Archiv an.
+- **Übersicht** und **Konto-Dateien:** Größe, ungenutzter Platz, Anzahl Mails, Zeitraum, Stand des Suchindex, freier Speicher; je Datei Konto, Mails und Größe.
+- **Sicherung erstellen …:** Legt am gewählten Ort einen neuen Ordner `SuperMailBackup-Sicherung <Datum>` mit einer geprüften Kopie jeder Konto-Datei an. Ein Abbruch oder Fehler hinterlässt keinen halben Sicherungsordner.
+- **Sicherung wiederherstellen …:** Ersetzt den Inhalt des Archivordners nach einer Rückfrage durch einen Sicherungsordner – oder durch eine einzelne Archivdatei einer Version bis 1.17, die dabei auf Konto-Dateien aufgeteilt wird. Das geschieht beim Neustart, bevor die App das Archiv benutzt. Die bisherigen Konto-Dateien bleiben im Unterordner `vor-Wiederherstellung <Datum>` erhalten. Gespeicherte Passwörter lassen sich nur unter demselben Windows-Benutzer entschlüsseln.
+- **Schnell prüfen / Vollständig prüfen:** Prüft jede Konto-Datei (SQLite `quick_check` bzw. `integrity_check`), die Verweise zwischen Mails und Konten und den Suchindex.
+- **Komprimieren:** Schreibt die Konto-Dateien neu und gibt ungenutzten Platz frei (VACUUM), z. B. nach dem Löschen im Entwicklermodus.
+- **Suchindex neu aufbauen:** Leert den Suchindex aller Konto-Dateien; die App baut ihn im Hintergrund neu auf.
+
+Während eines Abrufs ist keine Sicherung oder Wartung möglich und umgekehrt; der automatische Abruf wartet. Prüfen, Komprimieren und Sichern lassen sich abbrechen; nicht bearbeitete Dateien bleiben dann unverändert.
+
+### Umstellung auf eine Datei je Konto (1.18.0)
+
+Beim ersten Start von 1.18.0 teilt die App ein vorhandenes Archiv (`archiv.sqlite3`) einmalig mit Fortschrittsanzeige auf. Das Konto mit den meisten Mails wird dabei als ganze Datei kopiert (schnell, Suchindex bleibt erhalten), die übrigen Konten werden mailweise übernommen; deren Suchindex baut die App danach im Hintergrund auf. Jede neue Datei wird geprüft (`quick_check`, gleiche Anzahl Mails je Konto) und erst danach übernommen; anschließend löscht die App die alte `archiv.sqlite3`. Wird die Umstellung unterbrochen, setzt der nächste Start sie fort bzw. beginnt sie neu – das Original bleibt bis zum erfolgreichen Abschluss unverändert. Vorübergehend wird so viel freier Speicher gebraucht, wie das alte Archiv groß ist.
+
+Ältere Programmversionen kennen den Archivordner nicht. Wird über **Vorversion wiederherstellen** auf 1.17 oder älter zurückgegangen, startet diese mit einem leeren Archiv; die Konto-Dateien bleiben unberührt und erscheinen wieder, sobald 1.18 oder neuer läuft.
 
 ## Updates
 
@@ -82,7 +90,7 @@ Danach wird die laufende EXE ersetzt; die bisherige bleibt als SuperMailBackup.e
 
 ## Lokale Daten
 
-Die Datenbank liegt standardmäßig unter %LOCALAPPDATA%\MailArchiv\archiv.sqlite3 (anderer Ort: Reiter **Datenbank**), die Einstellungen immer in %LOCALAPPDATA%\MailArchiv\einstellungen.json. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
+Der Archivordner liegt standardmäßig unter %LOCALAPPDATA%\MailArchiv\Konten (anderer Ort: Reiter **Datenbank**), die Einstellungen immer in %LOCALAPPDATA%\MailArchiv\einstellungen.json. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
 
 Ab Version 1.3.0 speichert das Archiv zu jeder Mail ihren IMAP-Ordner. Beim ersten Start wird ein vorhandenes Archiv umgestellt. Frühere Konten mit gleichem Server und Benutzernamen, aber verschiedenen Ordnern, werden dabei zu einem Konto zusammengeführt. Ältere Programmversionen können das umgestellte Archiv nicht mehr öffnen. Die App legt deshalb vorher eine Kopie unter archiv-vor-1.3.sqlite3 ab, die nicht mehr benötigt wird, sobald alles funktioniert.
 

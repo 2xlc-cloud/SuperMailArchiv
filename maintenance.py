@@ -2,6 +2,7 @@
 
 Long operations take a progress callback and a cancel event; cancelling rolls back (the file stays as it was).
 """
+import json
 import os
 import shutil
 import sqlite3
@@ -9,7 +10,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from archive import SCHEMA_VERSION, connect
+from archive import SCHEMA_VERSION, connect, initialize
+from archive_set import next_file
 
 SQLITE_HEADER = b"SQLite format 3\x00"
 BACKUP_STEP = 2048  # Pages per backup step (8 MB at 4 KB pages), so progress and cancelling stay responsive.
@@ -247,4 +249,231 @@ def restore_database(path, source, progress=None):
     with closing(_open(source, readonly=True)) as db, closing(_open(path)) as target:
         db.backup(target, pages=BACKUP_STEP)
         target.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return kept
+
+
+# --- Since 1.18.0: one file per account --------------------------------------------------------------------------
+
+SPLIT_MARKER = "umstellung.json"
+SPLIT_BATCH = 300  # Mails per transaction while splitting (progress and memory stay small).
+
+
+def split_archive(source, folder, progress=None):
+    """Split a single-file archive (up to 1.17) into one file per account in folder.
+
+    All new files are written as *.teil, checked (quick_check, same number of mails per account) and only then
+    renamed; then the source is deleted. A marker file lets an interrupted run finish at the next start.
+    Returns {account file name: number of mails}.
+    """
+    report = progress or (lambda done, total, text: None)
+    source, folder = Path(source), Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    marker = folder / SPLIT_MARKER
+    if not marker.exists():
+        for stale in folder.glob("*.teil*"):
+            stale.unlink()
+        needed = file_size(source) + file_size(f"{source}-wal")
+        if shutil.disk_usage(folder).free < needed * 1.1 + 100 * 1024 ** 2:
+            raise OSError(f"Zu wenig freier Speicher: Die Umstellung braucht vorübergehend etwa "
+                          f"{needed // 1024 ** 2} MB zusätzlich.")
+        with closing(_open(source)) as db:
+            accounts = [row[0] for row in db.execute(
+                "SELECT id FROM accounts a WHERE enabled=1 OR EXISTS(SELECT 1 FROM mails WHERE account_id=a.id) "
+                "OR EXISTS(SELECT 1 FROM folders WHERE account_id=a.id) ORDER BY id")]
+            counts = dict(db.execute("SELECT account_id, count(*) FROM mails GROUP BY account_id").fetchall())
+        total = sum(counts.get(account_id, 0) for account_id in accounts)
+        # Reading whole mails row by row jumps through the file and can be very slow on some disks; the account
+        # with the most mails is therefore copied as a whole file (sequential) and the others are removed from it.
+        largest = max(accounts, key=lambda account_id: counts.get(account_id, 0), default=None)
+        done = 0
+        plan = {}
+        for account_id in accounts:
+            target = next_file(folder)
+            part = target.with_name(target.name + ".teil")
+            if account_id == largest:
+                mails = counts.get(account_id, 0)
+                _copy_whole(source, part, lambda share: report(
+                    done + int(mails * share), total,
+                    f"Mails werden umgestellt: {done + int(mails * share):,} von {total:,}".replace(",", ".")))
+                report(0, 0, f"{target.name}: Mails anderer Konten werden entfernt und überschrieben …")
+                _keep_only(part, account_id)
+                done += mails
+            else:
+                initialize(part)
+            with closing(_open(part)) as db:
+                if account_id == largest:
+                    report(0, 0, f"{target.name} wird geprüft (bei großen Archiven einige Minuten) …")
+                    _check_split(db, target, counts.get(account_id, 0))
+                    plan[part.name] = (target.name, counts.get(account_id, 0))
+                    continue
+                db.execute("ATTACH DATABASE ? AS old", (str(source),))
+                for table in ("accounts", "folders", "account_options", "mails"):
+                    mine = [row[1] for row in db.execute(f"PRAGMA main.table_info({table})")]
+                    theirs = {row[1] for row in db.execute(f"PRAGMA old.table_info({table})")}
+                    columns = ", ".join(column for column in mine if column in theirs)
+                    where = "id=?" if table == "accounts" else "account_id=?"
+                    if table != "mails":
+                        with db:
+                            db.execute(f"INSERT INTO main.{table}({columns}) SELECT {columns} FROM old.{table} "
+                                       f"WHERE {where}", (account_id,))
+                        continue
+                    last = 0
+                    while True:
+                        with db:
+                            copied = db.execute(
+                                f"INSERT INTO main.mails({columns}) SELECT {columns} FROM old.mails "
+                                f"WHERE account_id=? AND id>? ORDER BY id LIMIT ?",
+                                (account_id, last, SPLIT_BATCH)).rowcount
+                        if copied <= 0:
+                            break
+                        last = db.execute("SELECT max(id) FROM main.mails").fetchone()[0]
+                        done += copied
+                        report(done, total, f"Mails werden umgestellt: {done:,} von {total:,}".replace(",", "."))
+                db.execute("DETACH DATABASE old")
+                report(0, 0, f"{target.name} wird geprüft …")
+                _check_split(db, target, counts.get(account_id, 0))
+            plan[part.name] = (target.name, counts.get(account_id, 0))
+        marker.write_text(json.dumps({"source": str(source), "files": plan}), encoding="utf-8")
+    plan = json.loads(marker.read_text(encoding="utf-8"))["files"]
+    for part, (target, _) in plan.items():
+        if (folder / part).exists():
+            for suffix in ("-wal", "-shm"):
+                (folder / (part + suffix)).unlink(missing_ok=True)
+            os.replace(folder / part, folder / target)
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{source}{suffix}").unlink(missing_ok=True)
+    except OSError:
+        pass  # Still in use: the new files are complete; the marker makes the next start delete it.
+    else:
+        marker.unlink()
+    return {target: count for target, count in plan.values()}
+
+
+def _copy_whole(source, part, progress):
+    """Page-by-page copy of the whole archive (sequential reading); progress(share 0…1)."""
+    part.unlink(missing_ok=True)
+    with closing(_open(source)) as db, closing(sqlite3.connect(part)) as copy:
+        db.backup(copy, pages=BACKUP_STEP,
+                  progress=lambda status, remaining, total: progress((total - remaining) / total if total else 1))
+    initialize(part)  # WAL mode and any table or index this version adds.
+
+
+def _keep_only(part, account_id):
+    """Remove all other accounts (with their mails and search index entries) from a whole-file copy.
+
+    Their content is overwritten (secure_delete) and the search index is merged, so no trace of the other accounts'
+    mails stays in this file.
+    """
+    with closing(_open(part)) as db:
+        db.execute("PRAGMA secure_delete=ON")
+        _delete_other_accounts(db, account_id)
+        db.execute("INSERT INTO mail_search(mail_search) VALUES('optimize')")
+        db.commit()
+
+
+def _delete_other_accounts(db, account_id):
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM mail_search WHERE rowid IN (SELECT id FROM mails WHERE account_id != ?)",
+                   (account_id,))
+        db.execute("DELETE FROM mails WHERE account_id != ?", (account_id,))
+        for table in ("folders", "account_options"):
+            db.execute(f"DELETE FROM {table} WHERE account_id != ?", (account_id,))
+        db.execute("DELETE FROM accounts WHERE id != ?", (account_id,))
+
+
+def _check_split(db, target, expected):
+    if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise sqlite3.DatabaseError(f"Die neue Datei {target.name} ist fehlerhaft.")
+    copied = db.execute("SELECT count(*) FROM mails").fetchone()[0]
+    if copied != expected:
+        raise sqlite3.DatabaseError(f"{target.name}: {copied} statt {expected} Mails.")
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def split_pending(source, folder):
+    """True if a single-file archive still has to be split into folder (or an interrupted split finished)."""
+    return Path(source).is_file() or (Path(folder) / SPLIT_MARKER).exists()
+
+
+def default_backup_folder_name(now=None):
+    return f"SuperMailBackup-Sicherung {(now or datetime.now()):%Y-%m-%d %H-%M}"
+
+
+def backup_archive(files, target, progress=None, cancel=None):
+    """Checked copies of all account files into the new folder target. Returns the total size."""
+    target = Path(target)
+    needed = sum(file_size(path) + file_size(f"{path}-wal") for path in files)
+    target.mkdir(parents=True, exist_ok=False)
+    try:
+        if shutil.disk_usage(target).free < needed:
+            raise OSError(f"Zu wenig freier Speicher am Ziel: Die Sicherung braucht etwa {needed // 1024 ** 2} MB.")
+        for number, path in enumerate(files, 1):
+            with closing(_open(path)) as db:
+                _copy(db, target / Path(path).name,
+                      lambda text: progress(f"Datei {number} von {len(files)} · {text}") if progress else None,
+                      cancel, "Sicherung")
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)  # No half backup folder.
+        raise
+    return sum(file_size(path) for path in target.iterdir())
+
+
+def backup_problem(source):
+    """None if source is a backup folder (or an archive file of an older version) that can be restored."""
+    from archive_set import account_files
+
+    source = Path(source)
+    if source.is_dir():
+        files = account_files(source)
+        if not files:
+            return "Der Ordner enthält keine Konto-Dateien (Konto-1.sqlite3 …)."
+        for path in files:
+            problem = archive_problem(path)
+            if problem:
+                return f"{path.name}: {problem}"
+        return None
+    return archive_problem(source)
+
+
+def restore_archive(folder, source, progress=None):
+    """Replace the account files in folder by a backup folder or an older single-file archive.
+
+    The current files are moved into a subfolder "vor-Wiederherstellung <date>" first. Runs at program start.
+    Returns that subfolder (or None if there was nothing to keep).
+    """
+    from archive_set import account_files
+
+    report = progress or (lambda done, total, text: None)
+    folder, source = Path(folder), Path(source)
+    problem = backup_problem(source)
+    if problem:
+        raise ValueError(problem)
+    sources = account_files(source) if source.is_dir() else [source]
+    for path in sources:
+        with closing(_open(path, readonly=True)) as db:
+            if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise ValueError(f"{path.name} ist beschädigt; es wurde nichts eingespielt.")
+    current = account_files(folder)
+    kept = None
+    if current:
+        kept = folder / f"vor-Wiederherstellung {datetime.now():%Y-%m-%d %H-%M-%S}"
+        kept.mkdir()
+        for path in current:
+            for suffix in ("", "-wal", "-shm"):
+                if Path(f"{path}{suffix}").exists():
+                    os.replace(f"{path}{suffix}", kept / f"{path.name}{suffix}")
+    folder.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        for number, path in enumerate(sources, 1):
+            report(number - 1, len(sources), f"Datei {number} von {len(sources)} wird eingespielt …")
+            with closing(_open(path, readonly=True)) as db:
+                _copy(db, folder / path.name, None, None, "Wiederherstellung")
+    else:
+        # An archive of version 1.17 or older: split a copy, the backup itself stays untouched.
+        copy = folder / "wiederherstellung.tmp.sqlite3"
+        with closing(_open(source, readonly=True)) as db:
+            _copy(db, copy, None, None, "Wiederherstellung")
+        split_archive(copy, folder, progress)
     return kept

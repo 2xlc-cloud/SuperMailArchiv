@@ -918,7 +918,7 @@ def find_mails(path, query, offset=0, limit=100, account_id=None, folder=None, s
     with closing(connect(path)) as db:
         return db.execute(
             f"SELECT id, sender, subject, sent, has_attachments, length(raw) AS size, spam_score, spam_flag, "
-            f"dmarc_fail, spam_checked FROM mails WHERE {where} "
+            f"dmarc_fail, spam_checked, {key} AS sort_value FROM mails WHERE {where} "
             f"ORDER BY {order} LIMIT ? OFFSET ?", (*params, limit, offset)
         ).fetchall()
 

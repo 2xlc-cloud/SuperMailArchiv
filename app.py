@@ -14,16 +14,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from app_info import APP_NAME, VERSION_TEXT
-from archive import (Account, account_folders, account_password, clean_password, find_mails, folder_tree,
-                     get_period, get_skip_deleted, resolve_period, set_period, set_skip_deleted, count_mails, delete_account, delete_folder_mails,
-                     delete_mails, display_text, has_attachments, sender_address, store_attachment_flags,
-                     unknown_attachment_flags, attachment_progress, build_search_index,
-                     create_list_indexes, list_indexes_ready,
-                     spam_info, spam_progress, store_spam, unknown_spam,
-                     get_mail, initialize, load_folders, remember_password, remove_account, save_account,
-                     saved_accounts, set_folder_selection, sync)
+from archive import (Account, clean_password, display_text, has_attachments, resolve_period, sender_address,
+                     spam_info)
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane, remove_old_temporary_files
+from archive_set import ArchiveSet
 from database_tab import DatabaseTab
 from mail_window import MailWindow
 from program_icon import png_icon
@@ -43,13 +38,18 @@ class MailArchive(DatabaseTab):
         self.root = root
         self.data = data
         self.settings = Settings(data)
-        self.path = self.choose_archive_path()
-        restore_note = self.apply_pending_restore()
-        initialize(self.path)
+        self.events = queue.Queue()
+        # Created first: its hidden window marks the running instance, also during a long conversion below.
+        self.tray = TrayIcon(APP_NAME, lambda action: self.events.put(("tray", action)))
+        try:
+            # Archive folder with one database file per account; prepared (restore, conversion) before the window.
+            self.folder, restore_note = self.prepare_archive()
+            self.archive = ArchiveSet(self.folder)
+        except BaseException:
+            self.tray.stop()
+            raise
         remove_old_temporary_files()
         self.theme = self.settings["theme"]
-        self.events = queue.Queue()
-        self.tray = TrayIcon(APP_NAME, lambda action: self.events.put(("tray", action)))
         self.tray.set_visible(self.settings["tray"])
         self.hint_shown = False
         self.cancelled = threading.Event()
@@ -84,7 +84,7 @@ class MailArchive(DatabaseTab):
         self.build()
         self.update_theme()
         self.update_developer_ui()
-        accounts = saved_accounts(self.path)
+        accounts = self.archive.saved_accounts()
         self.reload_accounts(next(iter(accounts)) if len(accounts) == 1 else None)
         self.refresh()
         if start_minimized and self.settings["start_hidden"]:
@@ -93,9 +93,9 @@ class MailArchive(DatabaseTab):
             else:
                 root.iconify()
         if restore_note:
-            kind, text = restore_note
+            kind, title, text = restore_note
             root.after(300, lambda: (messagebox.showerror if kind == "error" else messagebox.showinfo)(
-                "Sicherung wiederherstellen", text, parent=root))
+                title, text, parent=root))
         root.after(100, self.poll)
         threading.Thread(target=self.background_work, daemon=True, name="Hintergrundarbeit").start()
         root.after(10_000, self.scheduled_update_check)
@@ -347,10 +347,10 @@ class MailArchive(DatabaseTab):
         minutes = self.settings["interval"]
         self.next_auto = time.time() + minutes * 60
         jobs = []
-        for key, account in saved_accounts(self.path).items():
-            password = account_password(self.path, key)
+        for key, account in self.archive.saved_accounts().items():
+            password = self.archive.account_password(key)
             if password:
-                jobs.append((account, password))
+                jobs.append((key, account, password))
         if not jobs:
             self.status.set("Automatischer Abruf: Kein Konto mit gespeichertem Passwort")
             return
@@ -439,7 +439,7 @@ class MailArchive(DatabaseTab):
         selected = self.table.selection()
         if not selected:
             return
-        mail_id = int(selected[0])
+        mail_id = selected[0]
         window = self.mail_windows.get(mail_id)
         if window is not None and window.winfo_exists():
             window.deiconify()
@@ -467,13 +467,13 @@ class MailArchive(DatabaseTab):
         self.refresh()
 
     def delete_selected_mails(self):
-        ids = [int(item) for item in self.table.selection()]
+        ids = list(self.table.selection())
         if not ids or not self.developer_allowed() or self.busy:
             return
         what = "Die ausgewählte Mail" if len(ids) == 1 else f"Die {len(ids)} ausgewählten Mails"
         if not self.confirm_delete("Mails löschen", what, len(ids)):
             return
-        self.run_delete(lambda: delete_mails(self.path, ids))
+        self.run_delete(lambda: self.archive.delete_mails(ids))
 
     def folder_tree_menu(self, event):
         node = self.folder_tree.identify_row(event.y)
@@ -484,7 +484,7 @@ class MailArchive(DatabaseTab):
         if key is None:
             return
         if folder is None:
-            account = next((a for k, a, _ in folder_tree(self.path) if k == key), None)
+            account = next((a for k, a, _ in self.archive.folder_tree() if k == key), None)
             entries = [("Konto mit allen Mails aus Archiv löschen …", lambda: self.delete_whole_account(key, account))]
         else:
             entries = [("Ordner aus Archiv löschen …", lambda: self.delete_folders(key, [folder], folder))]
@@ -504,9 +504,9 @@ class MailArchive(DatabaseTab):
         if self.busy:
             messagebox.showinfo("Löschen", "Bitte warte, bis der laufende Abruf beendet ist.", parent=self.root)
             return
-        count = count_mails(self.path, key, folders)
+        count = self.archive.count_mails(key, folders)
         if self.confirm_delete("Ordner löschen", f"Die Mails im Ordner „{self.folder_label(label)}“", count):
-            self.run_delete(lambda: delete_folder_mails(self.path, key, folders))
+            self.run_delete(lambda: self.archive.delete_folder_mails(key, folders))
 
     def delete_whole_account(self, key, account):
         if self.busy:
@@ -515,8 +515,8 @@ class MailArchive(DatabaseTab):
         name = account.label if account else "Dieses Konto"
         if self.confirm_delete("Konto löschen",
                                f"Das Konto {name} mit gespeichertem Passwort, Ordnerauswahl, Zeitraum und allen "
-                               f"Mails", count_mails(self.path, key)):
-            self.run_delete(lambda: delete_account(self.path, key))
+                               f"Mails", self.archive.count_mails(key)):
+            self.run_delete(lambda: self.archive.delete_account(key))
 
     def run_delete(self, action):
         try:
@@ -525,7 +525,7 @@ class MailArchive(DatabaseTab):
             messagebox.showerror("Löschen fehlgeschlagen", str(error), parent=self.root)
             return
         self.preview_id = None
-        self.reload_accounts(self.account_id if self.account_id in saved_accounts(self.path) else None)
+        self.reload_accounts(self.account_id if self.account_id in self.archive.saved_accounts() else None)
         self.refresh()
         self.status.set(f"{deleted} Mail{'' if deleted == 1 else 's'} aus dem lokalen Archiv gelöscht")
 
@@ -751,7 +751,7 @@ class MailArchive(DatabaseTab):
         if self.account_id is None:
             return
         try:
-            set_skip_deleted(self.path, self.account_id, self.skip_deleted.get())
+            self.archive.set_skip_deleted(self.account_id, self.skip_deleted.get())
         except (OSError, sqlite3.Error) as error:
             messagebox.showerror("Gelöschte Mails", str(error), parent=self.root)
 
@@ -764,7 +764,7 @@ class MailArchive(DatabaseTab):
 
     def show_period(self):
         """Show the archive period of the selected account."""
-        saved = get_period(self.path, self.account_id) if self.account_id is not None else ("", "")
+        saved = self.archive.get_period(self.account_id) if self.account_id is not None else ("", "")
         today = date.today()
         for side, spec in zip(("from", "to"), saved):
             kind, month, year = self.period_widgets[side]
@@ -777,7 +777,7 @@ class MailArchive(DatabaseTab):
                 kind.current(keys.index("month"))
                 month.current(int(spec[5:7]) - 1)
                 year.set(spec[:4])
-        self.skip_deleted.set(get_skip_deleted(self.path, self.account_id) if self.account_id is not None else True)
+        self.skip_deleted.set(self.archive.get_skip_deleted(self.account_id) if self.account_id is not None else True)
         self.skip_deleted_button.configure(state="normal" if self.account_id is not None else "disabled")
         self.update_period_widgets()
 
@@ -812,7 +812,7 @@ class MailArchive(DatabaseTab):
         if self.account_id is None:
             return
         try:
-            set_period(self.path, self.account_id, self.period_spec("from"), self.period_spec("to"))
+            self.archive.set_period(self.account_id, self.period_spec("from"), self.period_spec("to"))
         except (ValueError, OSError, sqlite3.Error) as error:
             messagebox.showwarning("Zeitraum", str(error), parent=self.root)
             self.show_period()
@@ -856,7 +856,7 @@ class MailArchive(DatabaseTab):
         opened = {self.choice_paths[node] for node in self.choice_paths if tree.item(node, "open")}
         tree.delete(*tree.get_children())
         self.choice_paths, self.choice_state, self.choice_labels = {}, {}, {}
-        folders = account_folders(self.path, self.account_id) if self.account_id is not None else []
+        folders = self.archive.account_folders(self.account_id) if self.account_id is not None else []
         created = {}
         for name, delimiter, role, chosen, count, on_server, deleted in folders:
             self.choice_state[name] = chosen
@@ -949,7 +949,7 @@ class MailArchive(DatabaseTab):
 
     def choose_folders(self, names, selected):
         try:
-            set_folder_selection(self.path, self.account_id, names, selected)
+            self.archive.set_folder_selection(self.account_id, names, selected)
         except (OSError, sqlite3.Error) as error:
             messagebox.showerror("Ordnerauswahl", str(error), parent=self.root)
             return
@@ -963,7 +963,7 @@ class MailArchive(DatabaseTab):
         account = self.accounts[self.account_id]
         if self.account_from_form() != account:
             raise ValueError("Speichere zuerst die geänderten Kontodaten.")
-        return account, clean_password(self.password.get() or account_password(self.path, self.account_id) or "")
+        return account, clean_password(self.password.get() or self.archive.account_password(self.account_id) or "")
 
     def load_server_folders(self):
         if self.account_id is None or self.loading_folders:
@@ -980,7 +980,7 @@ class MailArchive(DatabaseTab):
 
         def work():
             try:
-                load_folders(self.path, account, password)
+                self.archive.load_folders(key, account, password)
                 self.events.put(("folders", (key, None)))
             except Exception as error:
                 self.events.put(("folders", (key, str(error) or type(error).__name__)))
@@ -1084,7 +1084,7 @@ class MailArchive(DatabaseTab):
         tree.delete(*tree.get_children())
         self.folder_nodes = {"all": (None, None)}
         tree.insert("", "end", iid="all", text="Alle Konten", open=True)
-        for key, account, folders in folder_tree(self.path):
+        for key, account, folders in self.archive.folder_tree():
             account_node = f"a{key}"
             self.folder_nodes[account_node] = (key, None)
             tree.insert("all", "end", iid=account_node, text=f"{account.user} · {account.host}",
@@ -1112,7 +1112,7 @@ class MailArchive(DatabaseTab):
 
     def reload_accounts(self, select=None):
         self.reload_filters()
-        self.accounts = saved_accounts(self.path)
+        self.accounts = self.archive.saved_accounts()
         self.account_table.delete(*self.account_table.get_children())
         for key, account in self.accounts.items():
             self.account_table.insert("", "end", iid=str(key),
@@ -1123,8 +1123,8 @@ class MailArchive(DatabaseTab):
 
     def pick_account(self, _=None):
         selected = self.account_table.selection()
-        if selected and int(selected[0]) != self.account_id:
-            self.edit_account(int(selected[0]), focus=False)
+        if selected and selected[0] != self.account_id:
+            self.edit_account(selected[0], focus=False)
 
     def edit_account(self, key=None, focus=True):
         self.account_id = key
@@ -1134,7 +1134,7 @@ class MailArchive(DatabaseTab):
         for name, value in vars(account).items():
             self.values[name].set(value)
         self.password.set("")
-        self.has_password = key is not None and account_password(self.path, key) is not None
+        self.has_password = key is not None and self.archive.account_password(key) is not None
         self.update_account_buttons()
         self.show_account_folders()
         self.show_period()
@@ -1159,7 +1159,7 @@ class MailArchive(DatabaseTab):
             if not clear and self.account_from_form() != account:
                 raise ValueError("Speichere zuerst die geänderten Kontodaten.")
             password = None if clear else clean_password(self.password.get())
-            remember_password(self.path, self.account_id, account, password)
+            self.archive.remember_password(self.account_id, account, password)
         except (OSError, ValueError, sqlite3.Error) as error:
             messagebox.showerror("Passwort speichern", str(error), parent=self.root)
             return
@@ -1181,7 +1181,7 @@ class MailArchive(DatabaseTab):
     def store_account(self):
         try:
             account = self.account_from_form()
-            key = save_account(self.path, account, self.account_id)
+            key = self.archive.save_account(account, self.account_id)
         except (OSError, ValueError, sqlite3.Error) as error:
             text = "Dieses Konto ist bereits eingerichtet." if isinstance(error, sqlite3.IntegrityError) else str(error)
             messagebox.showerror("Konto speichern", text, parent=self.root)
@@ -1198,7 +1198,7 @@ class MailArchive(DatabaseTab):
         ):
             return
         try:
-            remove_account(self.path, self.account_id)
+            self.archive.remove_account(self.account_id)
         except (OSError, ValueError, sqlite3.Error) as error:
             messagebox.showerror("Konto entfernen", str(error), parent=self.root)
             return
@@ -1258,9 +1258,9 @@ class MailArchive(DatabaseTab):
             try:
                 visible = self.visible_unrated
                 self.visible_unrated = set()
-                batch = unknown_spam(self.path, mail_ids=visible) if visible else []
+                batch = self.archive.unknown_spam(mail_ids=visible) if visible else []
                 if not batch:
-                    batch = unknown_spam(self.path)
+                    batch = self.archive.unknown_spam()
                 if not batch:
                     self.events.put(("spam_progress", None))
                     return
@@ -1272,8 +1272,8 @@ class MailArchive(DatabaseTab):
                         rated[mail_id] = (info["score"], int(info["flag"]), int(info["dmarc_fail"]), 1)
                     except Exception:
                         rated[mail_id] = (None, 0, 0, 1)
-                store_spam(self.path, rated)
-                progress = spam_progress(self.path)
+                self.archive.store_spam(rated)
+                progress = self.archive.spam_progress()
             except (OSError, sqlite3.Error):
                 time.sleep(5)
                 continue
@@ -1314,10 +1314,10 @@ class MailArchive(DatabaseTab):
         """Once for archives from before 1.16.1: indexes that let the mail list skip the large mail rows."""
         while True:
             try:
-                if list_indexes_ready(self.path):
+                if self.archive.list_indexes_ready():
                     return
                 self.events.put(("list_indexes", False))
-                create_list_indexes(self.path)
+                self.archive.create_list_indexes()
                 self.events.put(("list_indexes", True))
                 return
             except (OSError, sqlite3.Error):
@@ -1331,7 +1331,7 @@ class MailArchive(DatabaseTab):
             while True:
                 self.pause_for_interface()
                 try:
-                    indexed, total = build_search_index(self.path)
+                    indexed, total = self.archive.build_search_index()
                 except (OSError, sqlite3.Error):
                     time.sleep(5)  # E.g. database busy; try again later.
                     continue
@@ -1359,9 +1359,9 @@ class MailArchive(DatabaseTab):
             try:
                 visible = self.visible_unknown
                 self.visible_unknown = set()
-                batch = unknown_attachment_flags(self.path, mail_ids=visible) if visible else []
+                batch = self.archive.unknown_attachment_flags(mail_ids=visible) if visible else []
                 if not batch:
-                    batch = unknown_attachment_flags(self.path, 100)
+                    batch = self.archive.unknown_attachment_flags(100)
                 if not batch:
                     self.events.put(("attachment_progress", None))
                     return
@@ -1369,8 +1369,8 @@ class MailArchive(DatabaseTab):
                 for mail_id, raw in batch:
                     self.pause_for_interface()
                     flags[mail_id] = has_attachments(raw)
-                store_attachment_flags(self.path, flags)
-                progress = attachment_progress(self.path)
+                self.archive.store_attachment_flags(flags)
+                progress = self.archive.attachment_progress()
             except (OSError, sqlite3.Error):
                 time.sleep(5)  # E.g. database busy; try again later.
                 continue
@@ -1407,7 +1407,7 @@ class MailArchive(DatabaseTab):
         selected = self.table.selection()
         self.foreground.set()
         try:
-            rows = find_mails(self.path, self.query.get(), self.offset, PAGE + 1, *self.current_filter(),
+            rows = self.archive.find_mails(self.query.get(), self.offset, PAGE + 1, *self.current_filter(),
                               sort=self.settings["sort"], descending=self.settings["sort_descending"],
                               sender=self.sender_filter, only_suspicious=self.only_suspicious.get(),
                               threshold=self.settings["spam_threshold"])
@@ -1415,10 +1415,10 @@ class MailArchive(DatabaseTab):
             self.foreground.clear()
         self.table.delete(*self.table.get_children())
         # Let the background detection check the mails on this page first.
-        self.visible_unknown = {row["id"] for row in rows[:PAGE] if row["has_attachments"] is None}
-        self.visible_unrated = {row["id"] for row in rows[:PAGE] if row["spam_checked"] is None}
+        self.visible_unknown = {row["key"] for row in rows[:PAGE] if row["has_attachments"] is None}
+        self.visible_unrated = {row["key"] for row in rows[:PAGE] if row["spam_checked"] is None}
         for row in rows[:PAGE]:
-            self.table.insert("", "end", iid=str(row["id"]),
+            self.table.insert("", "end", iid=row["key"],
                               values=(self.PAPERCLIP if row["has_attachments"] else "",
                                       row["subject"] or "(Ohne Betreff)", row["sender"], self.date_label(row["sent"]),
                                       self.time_label(row["sent"]), self.size_label(row["size"]),
@@ -1433,8 +1433,8 @@ class MailArchive(DatabaseTab):
 
     def show_selection(self, _=None):
         selected = self.table.selection()
-        mail_id = int(selected[0]) if selected else None
-        row = get_mail(self.path, mail_id) if mail_id is not None else None
+        mail_id = selected[0] if selected else None
+        row = self.archive.get_mail(mail_id) if mail_id is not None else None
         self.subject.configure(text=(row["subject"] or "(Ohne Betreff)") if row else "Mailvorschau")
         self.meta.configure(text=(
             f"Von: {row['sender'] or '—'}\nAn: {row['recipient'] or '—'}\n"
@@ -1443,7 +1443,7 @@ class MailArchive(DatabaseTab):
         ) if row else "Wähle eine Nachricht aus der Liste.")
         self.mail_id.set(row["mail_id"] if row else "")
         self.copy_button.configure(state="normal" if row else "disabled")
-        raw = get_mail(self.path, mail_id, raw=True)["raw"] if row else None
+        raw = self.archive.get_mail(mail_id, raw=True)["raw"] if row else None
         if raw is not None:
             spam = self.spam_explanation(raw)
             if spam:
@@ -1522,11 +1522,11 @@ class MailArchive(DatabaseTab):
         if not selected:
             return
         destination = filedialog.asksaveasfilename(parent=self.root, defaultextension=".eml",
-                                                   initialfile=f"Mail-{selected[0]}.eml",
+                                                   initialfile=f"Mail-{selected[0].replace(':', '-')}.eml",
                                                    filetypes=[("E-Mail", "*.eml")])
         if destination:
             try:
-                Path(destination).write_bytes(get_mail(self.path, int(selected[0]), raw=True)["raw"])
+                Path(destination).write_bytes(self.archive.get_mail(selected[0], raw=True)["raw"])
             except OSError as error:
                 messagebox.showerror("Export fehlgeschlagen", str(error), parent=self.root)
 
@@ -1544,22 +1544,22 @@ class MailArchive(DatabaseTab):
             return
 
         self.password.set("")
-        self.run_sync([(account, password)], automatic=False)
+        self.run_sync([(self.account_id, account, password)], automatic=False)
 
     def run_sync(self, jobs, automatic):
         self.sync_auto = automatic
-        self.sync_user = jobs[0][0].user
+        self.sync_user = jobs[0][1].user
         self.cancelled.clear()
         self.set_sync_state(True)
 
         def work():
             saved, missing, failed, errors = 0, 0, 0, []
-            for account, password in jobs:
+            for key, account, password in jobs:
                 if self.cancelled.is_set():
                     break
                 self.events.put(("account", account.user))
                 try:
-                    result = sync(self.path, account, password,
+                    result = self.archive.sync(key, account, password,
                                   lambda folder, done, total: self.events.put(("progress", (folder, done, total))),
                                   self.cancelled)
                     saved, missing, failed = saved + result[0], missing + result[1], failed + len(result[2])
