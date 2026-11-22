@@ -200,10 +200,11 @@ class MailArchive(DatabaseTab):
         self.page_label.pack(pady=7)
         self.table = ttk.Treeview(results, columns=tuple(self.COLUMNS), show="headings", selectmode="extended")
         for key, (label, width) in self.COLUMNS.items():
-            self.table.heading(key, command=lambda key=key: self.sort_by(key))
-            self.table.column(key, width=width, minwidth=34 if key == "attach" else 55,
-                              stretch=key in ("subject", "sender"),
-                              anchor={"attach": "center", "size": "e", "spam": "e"}.get(key, "w"))
+            anchor = self.ANCHORS.get(key, "w")
+            # Headings aligned like their values, so short columns do not look spread apart.
+            self.table.heading(key, command=lambda key=key: self.sort_by(key), anchor=anchor)
+            self.table.column(key, width=width, minwidth=30 if key == "attach" else 46,
+                              stretch=key in ("subject", "sender"), anchor=anchor)
         self.update_sort_headings()
         scroll = ttk.Scrollbar(results, command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
@@ -1232,8 +1233,10 @@ class MailArchive(DatabaseTab):
         self.offset += delta
         self.refresh()
 
-    COLUMNS = {"attach": ("📎", 46), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 85),
-               "time": ("Uhrzeit", 65), "size": ("Größe", 75), "spam": ("Spam", 70)}
+    # Narrow fixed columns for short values; subject and sender take the remaining width.
+    COLUMNS = {"attach": ("📎", 34), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 80),
+               "time": ("Uhrzeit", 58), "size": ("Größe", 64), "spam": ("Spam", 54)}
+    ANCHORS = {"attach": "center", "time": "center", "size": "e", "spam": "e"}
     PAPERCLIP = "📎"
 
     def sort_by(self, key):
