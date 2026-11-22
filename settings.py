@@ -6,6 +6,7 @@ import winreg
 from pathlib import Path
 
 from app_info import APP_NAME
+from appearance import THEMES
 
 DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True, "interval": 0, "developer": False,
             "sort": "date", "sort_descending": True, "check_updates": True, "spam_threshold": 5,
@@ -35,7 +36,7 @@ class Settings:
         for key, default in DEFAULTS.items():
             if isinstance(stored, dict) and isinstance(stored.get(key), type(default)):
                 self.values[key] = stored[key]
-        if self.values["theme"] not in ("dark", "light"):
+        if self.values["theme"] not in THEMES:
             self.values["theme"] = "dark"
         if self.values["spam_threshold"] not in SPAM_THRESHOLDS:
             self.values["spam_threshold"] = 5

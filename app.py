@@ -16,10 +16,11 @@ from tkinter import filedialog, messagebox, ttk
 from app_info import APP_NAME, VERSION_TEXT
 from archive import (Account, clean_password, display_text, has_attachments, resolve_period, sender_address,
                      spam_info)
-from appearance import PALETTES, apply_theme
+from appearance import PALETTES, apply_theme, theme_label
 from attachments import AttachmentPane, remove_old_temporary_files
 from archive_set import ArchiveSet
 from database_tab import DatabaseTab
+from theme_dialog import ThemeDialog
 from mail_window import MailWindow
 from program_icon import png_icon
 from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
@@ -106,17 +107,21 @@ class MailArchive(DatabaseTab):
         self.attachments.theme = self.theme
         for window in self.mail_windows.values():
             window.update_theme(self.theme)
-        self.theme_button.configure(text="Hell" if self.theme == "dark" else "Dunkel")
-        self.theme_choice.set(self.theme)
+        self.theme_name.configure(text=theme_label(self.theme))
 
-    def toggle_theme(self):
-        self.set_theme("light" if self.theme == "dark" else "dark")
+    def choose_theme(self):
+        ThemeDialog(self)
+
+    def show_theme(self, name):
+        """Show a design in the whole program without saving it (preview while choosing)."""
+        if name in PALETTES and name != self.theme:
+            self.theme = name
+            self.update_theme()
 
     def set_theme(self, name):
         if name not in PALETTES:
             return
-        self.theme = name
-        self.update_theme()
+        self.show_theme(name)
         self.save_setting("theme", name)
 
     def save_setting(self, key, value):
@@ -129,7 +134,7 @@ class MailArchive(DatabaseTab):
         header = ttk.Frame(self.root, padding=(16, 12, 16, 4))
         header.pack(fill="x")
         ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
-        self.theme_button = ttk.Button(header, width=7, command=self.toggle_theme)
+        self.theme_button = ttk.Button(header, text="Design …", command=self.choose_theme)
         self.theme_button.pack(side="right")
         self.developer_label = ttk.Label(header, text="Entwicklermodus", style="Developer.TLabel")
         self.status = tk.StringVar(value="Bereit")
@@ -321,10 +326,9 @@ class MailArchive(DatabaseTab):
         self.spam_choice.bind("<<ComboboxSelected>>", lambda _: self.change_spam_threshold())
         ttk.Label(spam, text="Punkten").pack(side="left")
         self.build_updates(row).grid(row=0, column=1, rowspan=2, sticky="nsew")
-        self.theme_choice = tk.StringVar(value=self.theme)
-        for value, label in (("dark", "Dunkel"), ("light", "Hell")):
-            ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_choice,
-                            command=lambda: self.set_theme(self.theme_choice.get())).pack(side="left", padx=(0, 14))
+        self.theme_name = ttk.Label(appearance)
+        self.theme_name.pack(side="left", padx=(0, 12))
+        ttk.Button(appearance, text="Design wählen …", command=self.choose_theme).pack(side="left")
         self.update_autostart()
 
     def change_interval(self):

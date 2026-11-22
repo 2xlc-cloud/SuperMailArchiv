@@ -5,18 +5,100 @@ from ctypes import wintypes
 from tkinter import ttk
 
 
-PALETTES = {
-    "dark": {
-        "bg": "#1b1e24", "panel": "#232830", "field": "#14171c", "fg": "#e6eaf2",
-        "muted": "#9aa4b5", "accent": "#4c8dff", "border": "#3a4250", "select": "#2f5fb3",
-        "button": "#2b313b", "hover": "#38404d", "disabled": "#6b7585",
-    },
-    "light": {
-        "bg": "#f0f0f0", "panel": "#f0f0f0", "field": "#ffffff", "fg": "#1a1a1a",
-        "muted": "#555555", "accent": "#0067c0", "border": "#adadad", "select": "#0063b1",
-        "button": "#e1e1e1", "hover": "#e5f1fb", "disabled": "#8a8a8a",
-    },
+# Base colours of the designs: (German name, background, input fields, text, accent). Everything else (panels,
+# buttons, borders, selection, muted text) is derived below, with the contrast of text, links and selections
+# checked, so every design stays readable. Mostly dark designs; "light" is the classic bright one.
+THEMES = {
+    "dark": ("Nachtblau (Standard)", "#1b1e24", "#14171c", "#e6eaf2", "#4c8dff"),
+    "graphite": ("Graphit", "#202124", "#17181a", "#e8eaed", "#8ab4f8"),
+    "anthracite": ("Anthrazit", "#262626", "#1c1c1c", "#ececec", "#9e9e9e"),
+    "slate": ("Schiefer", "#1e2329", "#161a1f", "#dfe5ec", "#7aa2c8"),
+    "midnight": ("Mitternacht", "#0f1626", "#0a0f1b", "#dde6f7", "#5b8def"),
+    "polar": ("Polarnacht", "#2e3440", "#262b35", "#eceff4", "#88c0d0"),
+    "deepsea": ("Tiefsee", "#0f1f24", "#0a1619", "#d8eef0", "#3fb6c6"),
+    "petrol": ("Petrol", "#13262b", "#0d1c20", "#dceceb", "#2fa39a"),
+    "forest": ("Waldgrün", "#16211a", "#101812", "#dfeee2", "#5cbf7a"),
+    "moss": ("Moos", "#22241a", "#191b13", "#ebeedb", "#a3b84a"),
+    "emerald": ("Smaragd", "#121a18", "#0c1311", "#ddf0ea", "#2ecc8f"),
+    "aubergine": ("Aubergine", "#231a2b", "#1a1320", "#efe4f5", "#b07ae0"),
+    "violet": ("Violette Nacht", "#1d1b2e", "#151422", "#e6e3f7", "#9d8cff"),
+    "bordeaux": ("Bordeaux", "#2a1619", "#1f1013", "#f5e4e6", "#e06c7a"),
+    "espresso": ("Espresso", "#231c18", "#1a1411", "#f2e8e0", "#c8916a"),
+    "copper": ("Kupfer", "#1f1b19", "#161311", "#f0e6df", "#e07b39"),
+    "amber": ("Bernstein", "#141414", "#0c0c0c", "#ece6d8", "#f0b429"),
+    "contrast": ("Hoher Kontrast", "#000000", "#000000", "#ffffff", "#ffd400"),
+    "fog": ("Nebelgrau", "#3a3d42", "#2f3236", "#f1f2f4", "#8fb8ff"),
+    "light": ("Hell", "#f0f0f0", "#ffffff", "#1a1a1a", "#0067c0"),
 }
+
+
+def _rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _hex(rgb):
+    return "#" + "".join(f"{max(0, min(255, round(value))):02x}" for value in rgb)
+
+
+def mix(first, second, share):
+    """first moved share (0…1) of the way towards second."""
+    a, b = _rgb(first), _rgb(second)
+    return _hex(x + (y - x) * share for x, y in zip(a, b))
+
+
+def luminance(color):
+    def channel(value):
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+    r, g, b = (channel(value) for value in _rgb(color))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(first, second):
+    light, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _readable(color, background, towards, minimum):
+    """color moved towards `towards` until it reaches the minimum contrast against background."""
+    for step in range(21):
+        candidate = mix(color, towards, step / 20)
+        if contrast(candidate, background) >= minimum:
+            return candidate
+    return towards
+
+
+def build_palette(bg, field, fg, accent):
+    dark = luminance(bg) < 0.3
+    lift = "#ffffff" if dark else "#000000"
+    accent = _readable(accent, field, "#ffffff" if dark else "#000000", 4.5)
+    accent = _readable(accent, bg, "#ffffff" if dark else "#000000", 4.5)
+    # Selected rows show white text: the selection colour must be dark enough for it.
+    select = _readable(mix(accent, bg, 0.35) if dark else accent, "#ffffff", "#000000", 4.5)
+    return {
+        "dark": dark, "bg": bg, "field": field, "fg": fg, "accent": accent, "select": select,
+        "panel": mix(bg, lift, 0.04) if dark else bg,
+        "muted": _readable(mix(fg, bg, 0.38), bg, fg, 4.5),
+        "border": mix(bg, lift, 0.17 if dark else 0.28),
+        "button": mix(bg, lift, 0.08 if dark else 0.06),
+        "hover": mix(bg, lift, 0.15) if dark else "#e5f1fb",
+        "disabled": mix(fg, bg, 0.55),
+        # Text on accent-coloured buttons.
+        "on_accent": "#10141a" if contrast("#10141a", accent) >= contrast("#ffffff", accent) else "#ffffff",
+        "warning": "#f59b1a" if dark else "#b35c00",
+    }
+
+
+PALETTES = {key: build_palette(*colors[1:]) for key, colors in THEMES.items()}
+# The original designs keep their exact colours.
+PALETTES["dark"].update(panel="#232830", muted="#9aa4b5", border="#3a4250", select="#2f5fb3", button="#2b313b",
+                        hover="#38404d", disabled="#6b7585", on_accent="#10141a")
+PALETTES["light"].update(panel="#f0f0f0", muted="#555555", border="#adadad", select="#0063b1", button="#e1e1e1",
+                         hover="#e5f1fb", disabled="#8a8a8a")
+
+
+def theme_label(name):
+    return THEMES.get(name, THEMES["dark"])[0]
 
 
 def apply_theme(root, name):
@@ -34,7 +116,7 @@ def apply_theme(root, name):
     style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
     style.configure("Preview.TLabel", font=("Segoe UI", 13, "bold"))
     style.configure("Muted.TLabel", foreground=palette["muted"])
-    style.configure("Developer.TLabel", foreground="#f59b1a" if name == "dark" else "#b35c00",
+    style.configure("Developer.TLabel", foreground=palette["warning"],
                     font=("Segoe UI", 10, "bold"))
     style.configure("Status.TLabel", relief="sunken", padding=(8, 3))
     style.configure("TLabelframe", background=bg, bordercolor=border)
@@ -43,13 +125,13 @@ def apply_theme(root, name):
     style.configure("TButton", background=button, padding=(10, 4), relief="flat")
     style.map("TButton", background=[("disabled", panel), ("pressed", selection), ("active", hover)],
               foreground=[("disabled", disabled), ("pressed", "white")], bordercolor=[("focus", accent)])
-    primary_background = accent if name == "dark" else button
-    # Dark text keeps sufficient contrast on SuperPyBackup's bright blue in dark mode.
-    primary_foreground = "#10141a" if name == "dark" else fg
+    primary_background = accent if palette["dark"] else button
+    # Dark or white text, whichever contrasts more with the design's accent colour.
+    primary_foreground = palette["on_accent"] if palette["dark"] else fg
     style.configure("Accent.TButton", background=primary_background, foreground=primary_foreground,
                     font=("Segoe UI", 10, "bold"), padding=(14, 8))
     style.map("Accent.TButton", background=[("disabled", panel), ("pressed", selection),
-                                          ("active", "#6aa0ff" if name == "dark" else hover)],
+                                          ("active", mix(accent, "#ffffff", 0.2) if palette["dark"] else hover)],
               foreground=[("disabled", disabled), ("pressed", "white")])
 
     for widget in ("TCheckbutton", "TRadiobutton"):
@@ -89,7 +171,7 @@ def style_native_widgets(widget, name):
     palette = PALETTES[name]
     if isinstance(widget, (tk.Tk, tk.Toplevel)):
         widget.configure(background=palette["bg"])
-        dark_titlebar(widget, name == "dark")
+        dark_titlebar(widget, palette["dark"])
     elif isinstance(widget, tk.Text):
         widget.configure(background=palette["field"], foreground=palette["fg"],
                          insertbackground=palette["fg"], selectbackground=palette["select"],

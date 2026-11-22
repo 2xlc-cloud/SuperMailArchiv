@@ -1,6 +1,6 @@
 # SuperMailBackup
 
-SuperMailBackup archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Beim ersten Start ist der Dunkelmodus aktiv. Oben rechts lässt sich die Darstellung umschalten.
+SuperMailBackup archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Beim ersten Start ist das dunkle Design „Nachtblau“ aktiv; oben rechts unter **Design …** stehen 20 Designs zur Wahl.
 
 ## Starten
 
@@ -45,7 +45,7 @@ Im Reiter **Einstellungen** lässt sich festlegen:
 - **Im Infobereich weiterlaufen:** Beim Schließen des Fensters läuft die App mit einem Symbol im Infobereich neben der Uhr weiter. Ein Klick auf das Symbol öffnet das Fenster wieder, Rechtsklick → **Beenden** beendet die App. Standardmäßig eingeschaltet.
 - **Mit Windows starten:** Trägt die App für das aktuelle Windows-Benutzerkonto in den Autostart ein. Optional startet sie dabei nur im Hintergrund. Wird die EXE an einen anderen Ort verschoben, bietet der Reiter an, den Autostart anzupassen.
 - **Automatischer Abruf:** Aus, alle 10 Minuten, alle 30 Minuten, jede Stunde oder alle 2 Stunden. Abgerufen werden alle Konten mit gespeichertem Passwort, der erste Abruf eine Minute nach dem Programmstart. Während eines Abrufs ist das Symbol orange. Fehler meldet die App in der Statuszeile oder, wenn das Fenster verborgen ist, als Benachrichtigung.
-- **Darstellung:** Dunkel oder Hell.
+- **Darstellung:** **Design wählen …** (auch oben rechts über **Design …**) bietet 20 Designs, überwiegend dunkel: Nachtblau, Graphit, Anthrazit, Schiefer, Mitternacht, Polarnacht, Tiefsee, Petrol, Waldgrün, Moos, Smaragd, Aubergine, Violette Nacht, Bordeaux, Espresso, Kupfer, Bernstein, Hoher Kontrast, Nebelgrau und Hell. Jedes Design zeigt in der Liste ein Farbmuster; beim Durchblättern stellt sich das ganze Programm sofort darauf um (Vorschau), **Übernehmen** behält es, **Abbrechen** stellt das bisherige wieder her. Alle Designs sind auf gut lesbaren Kontrast von Text, Links und Auswahl geprüft (mindestens 4,5:1). Die HTML-Ansicht einer Mail bleibt so, wie der Absender sie gestaltet hat.
 - **Entwicklermodus:** Nach einer Rückfrage lassen sich archivierte Mails, Ordner und Konten aus dem lokalen Archiv löschen. Die App zeigt dann oben rechts „Entwicklermodus“ an. Gelöscht wird per Rechtsklick im Reiter **Archiv**, mit der Entf-Taste oder über **Aus Archiv löschen …**:
   - **Mails:** eine oder mehrere markierte Mails.
   - **Ordner:** die Mails eines Ordners, auf Wunsch mit allen Unterordnern. Die Ordnerauswahl bleibt erhalten.
