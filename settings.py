@@ -13,7 +13,11 @@ DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True, "interval": 0, 
             # Tab Datenbank: chosen archive folder ("" = standard archive; an archive file chosen with 1.16/1.17 is
             # converted next to it), backup folder or file to restore at the next start,
             # last backup {"time", "file"}.
-            "database": "", "restore_from": "", "last_backup": {}}
+            "database": "", "restore_from": "", "last_backup": {},
+            # Tab Archiv: accounts and folders on the left folded away (1.21.0).
+            "folders_collapsed": False,
+            # Mail preview next to the list ("right") or below it ("bottom") (1.21.0).
+            "preview_position": "right"}
 # Points of the server's spam rating from which a mail is marked as suspicious.
 SPAM_THRESHOLDS = (3, 4, 5, 6, 7, 8, 10)
 # Automatic sync interval in minutes; 0 switches it off.
@@ -40,6 +44,8 @@ class Settings:
             self.values["theme"] = "dark"
         if self.values["spam_threshold"] not in SPAM_THRESHOLDS:
             self.values["spam_threshold"] = 5
+        if self.values["preview_position"] not in ("right", "bottom"):
+            self.values["preview_position"] = "right"
         if self.values["interval"] not in INTERVALS:
             self.values["interval"] = 0
         if self.values["sort"] not in ("attach", "subject", "sender", "date", "time", "size", "spam"):

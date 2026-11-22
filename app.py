@@ -155,6 +155,9 @@ class MailArchive(DatabaseTab):
 
         search_bar = ttk.Frame(outer)
         search_bar.pack(fill="x", pady=(0, 10))
+        # Folds the accounts and folders on the left away (and back); names the shown folder while folded.
+        self.folders_button = ttk.Button(search_bar, command=self.toggle_folders)
+        self.folders_button.pack(side="left", padx=(0, 10))
         ttk.Label(search_bar, text="Suche").pack(side="left", padx=(0, 7))
         self.query = tk.StringVar()
         search = ttk.Entry(search_bar, textvariable=self.query)
@@ -171,15 +174,20 @@ class MailArchive(DatabaseTab):
         self.only_suspicious = tk.BooleanVar(value=False)
         ttk.Checkbutton(search_bar, text="Nur verdächtige ⚠", variable=self.only_suspicious,
                         command=self.set_filter).pack(side="left", padx=(12, 0))
+        self.position_button = ttk.Button(search_bar, command=self.toggle_preview_position)
+        self.position_button.pack(side="right", padx=(10, 0))
 
-        panes = ttk.Panedwindow(outer, orient="horizontal")
+        panes = self.archive_panes = ttk.Panedwindow(outer, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        folders = ttk.Frame(panes, padding=(0, 0, 6, 0))
-        results = ttk.Frame(panes, padding=(6, 0, 6, 0))
-        preview = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        folders = self.folders_pane = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        # List and preview share an inner split that is rebuilt when the preview moves (right ⇄ bottom).
+        content = self.mail_area = ttk.Frame(panes)
+        results = self.results_pane = ttk.Frame(content)
+        preview = self.preview_pane = ttk.Frame(content)
         panes.add(folders, weight=0)
-        panes.add(results, weight=1)
-        panes.add(preview, weight=1)
+        panes.add(content, weight=1)
+        self.mail_panes = None
+        self.arrange_preview()
         self.folder_tree = ttk.Treeview(folders, show="tree", selectmode="browse")
         self.folder_tree.column("#0", width=210, minwidth=120)
         folder_scroll = ttk.Scrollbar(folders, command=self.folder_tree.yview)
@@ -189,6 +197,9 @@ class MailArchive(DatabaseTab):
         self.folder_tree.bind("<<TreeviewSelect>>", lambda _: self.select_folder())
         self.folder_tree.bind("<Button-3>", self.folder_tree_menu)
         self.folder_nodes = {}
+        if self.settings["folders_collapsed"]:
+            panes.forget(folders)
+        self.root.bind("<Control-b>", lambda _: self.toggle_folders())
 
         nav = ttk.Frame(results)
         nav.pack(side="bottom", fill="x", pady=(7, 0))
@@ -247,8 +258,8 @@ class MailArchive(DatabaseTab):
         self.attachments = AttachmentPane(self.preview_tabs, self.theme)
         self.preview_tabs.add(message, text="Nachricht")
         self.preview_tabs.add(self.attachments, text="Anhänge")
-        self.body = tk.Text(message, wrap="word", font=("Segoe UI", 10),
-                            padx=11, pady=9, width=36, state="disabled")
+        self.body = tk.Text(message, wrap="word", font=("Segoe UI", 10), padx=11, pady=9, width=36,
+                            height=6 if self.settings["preview_position"] == "bottom" else 24, state="disabled")
         scroll = ttk.Scrollbar(message, command=self.body.yview)
         self.body.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -1074,11 +1085,76 @@ class MailArchive(DatabaseTab):
         selected = self.folder_tree.selection()
         return self.folder_nodes.get(selected[0], (None, None)) if selected else (None, None)
 
+    def arrange_preview(self):
+        """Place the preview next to the mail list or below it, as chosen."""
+        below = self.settings["preview_position"] == "bottom"
+        if self.mail_panes is not None:
+            for pane in self.mail_panes.panes():
+                self.mail_panes.forget(pane)
+            self.mail_panes.destroy()
+        self.mail_panes = ttk.Panedwindow(self.mail_area, orient="vertical" if below else "horizontal")
+        self.mail_panes.pack(fill="both", expand=True)
+        self.results_pane.configure(padding=(6, 0, 0, 6) if below else (6, 0, 6, 0))
+        self.preview_pane.configure(padding=(6, 8, 0, 0) if below else (8, 0, 0, 0))
+        self.mail_panes.add(self.results_pane, weight=1)
+        self.mail_panes.add(self.preview_pane, weight=1)
+        self.results_pane.lift()
+        self.preview_pane.lift()
+        # Below the list the preview would otherwise claim nearly all the height (it asks for a tall text field).
+        if hasattr(self, "body"):
+            self.body.configure(height=6 if below else 24)
+        if below:
+            self.mail_panes.bind("<Map>", lambda _: self.root.after_idle(self.split_preview), add="+")
+            self.root.after_idle(self.split_preview)
+        self.position_button.configure(text="Vorschau rechts" if below else "Vorschau unten")
+
+    def split_preview(self):
+        """With the preview below: 45 % of the height for the mail list, the rest for the preview."""
+        panes = self.mail_panes
+        if panes is None or str(panes.cget("orient")) != "vertical" or len(panes.panes()) < 2:
+            return
+        panes.update_idletasks()
+        height = panes.winfo_height()
+        if height > 50:
+            panes.sashpos(0, int(height * 0.45))
+
+    def toggle_preview_position(self):
+        below = self.settings["preview_position"] == "bottom"
+        self.save_setting("preview_position", "right" if below else "bottom")
+        self.arrange_preview()
+
+    def folders_shown(self):
+        return str(self.folders_pane) in self.archive_panes.panes()
+
+    def toggle_folders(self):
+        """Fold the accounts and folders away to give the mail list more room, or show them again."""
+        if self.folders_shown():
+            self.archive_panes.forget(self.folders_pane)
+        else:
+            self.archive_panes.insert(0, self.folders_pane, weight=0)
+        self.save_setting("folders_collapsed", not self.folders_shown())
+        self.update_folders_button()
+
+    def update_folders_button(self):
+        if self.folders_shown():
+            self.folders_button.configure(text="◀ Ordner")
+            return
+        # Folded: the shown account or folder stays visible on the button (a click shows the tree again).
+        selected = self.folder_tree.selection()
+        label = self.folder_tree.item(selected[0], "text") if selected else "Alle Konten"
+        account = self.folder_tree.parent(selected[0]) if selected else ""
+        while account and self.folder_tree.parent(account) not in ("", "all"):
+            account = self.folder_tree.parent(account)
+        if account and account != "all" and account != (selected[0] if selected else ""):
+            label = f"{self.folder_tree.item(account, 'text').split(' · ')[0]} › {label}"
+        self.folders_button.configure(text=f"▶ {label}")
+
     def select_folder(self):
         # Rebuilding the tree also fires the selection event; only react to real changes.
         if self.current_filter() != getattr(self, "active_filter", None):
             self.active_filter = self.current_filter()
             self.set_filter()
+        self.update_folders_button()
 
     def set_filter(self):
         self.offset = 0
@@ -1117,6 +1193,7 @@ class MailArchive(DatabaseTab):
         tree.selection_set(selection)
         tree.see(selection)
         self.active_filter = self.folder_nodes[selection]
+        self.update_folders_button()
 
     def reload_accounts(self, select=None):
         self.reload_filters()
@@ -1238,11 +1315,11 @@ class MailArchive(DatabaseTab):
 
     # Narrow fixed columns for short values; subject and sender take the remaining width.
     COLUMNS = {"attach": ("📎", 34), "subject": ("Betreff", 215), "sender": ("Von", 145), "date": ("Datum", 80),
-               "time": ("Uhrzeit", 58), "size": ("Größe", 64), "spam": ("Spam", 54)}
-    ANCHORS = {"attach": "center", "time": "center", "size": "e", "spam": "e"}
+               "time": ("Zeit", 58), "size": ("Gr", 64), "spam": ("⚠", 54)}
+    ANCHORS = {"attach": "center", "time": "center", "size": "e", "spam": "center"}
     # Longest values of the short columns; their width is measured from these and the heading with its sort arrow.
     SAMPLES = {"attach": ("📎",), "date": ("88.88.8888",), "time": ("88:88",), "size": ("888 KB", "88,8 MB"),
-               "spam": ("⚠ 88,8", "-88,8")}
+               "spam": ("⚠", "✓")}
 
     def fit_columns(self, _event=None):
         """Subject and sender share the space left by the short columns (60:40), so every column stays visible."""
@@ -1313,11 +1390,13 @@ class MailArchive(DatabaseTab):
         return bool(flag or dmarc_fail or (score is not None and score >= self.settings["spam_threshold"]))
 
     def spam_label(self, score, flag, dmarc_fail):
-        """Score of the server's spam rating, with ⚠ for suspicious mails; empty if the mail was not rated."""
+        """Symbol for the spam column: ⚠ suspicious, ✓ rated and unsuspicious, empty if the server did not rate it.
+
+        The score and the reasons are shown in the preview and the detail window.
+        """
         if score is None and not flag and not dmarc_fail:
             return ""
-        text = "" if score is None else f"{score:.1f}".replace(".", ",")
-        return ("⚠ " + text).strip() if self.spam_suspicious(score, flag, dmarc_fail) else text
+        return "⚠" if self.spam_suspicious(score, flag, dmarc_fail) else "✓"
 
     def spam_explanation(self, raw):
         """Line for the preview: why the server considers a mail suspicious (or that it is not)."""
