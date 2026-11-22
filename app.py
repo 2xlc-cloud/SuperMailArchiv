@@ -25,6 +25,7 @@ from archive import (Account, account_folders, account_password, clean_password,
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane, remove_old_temporary_files
 from database_tab import DatabaseTab
+from mail_window import MailWindow
 from program_icon import png_icon
 from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
                       set_autostart)
@@ -58,6 +59,7 @@ class MailArchive(DatabaseTab):
         self.account_id = None
         self.accounts = {}
         self.preview_id = None
+        self.mail_windows = {}  # Open detail windows by mail id.
         self.visible_unknown = set()  # Mails on the current page whose paperclip is not yet known.
         self.visible_unrated = set()  # Mails on the current page whose spam rating was not yet read.
         # Set while the user interface queries the database; the background work then pauses, because both
@@ -102,6 +104,8 @@ class MailArchive(DatabaseTab):
         apply_theme(self.root, self.theme)
         self.body.tag_configure("link", foreground=PALETTES[self.theme]["accent"])
         self.attachments.theme = self.theme
+        for window in self.mail_windows.values():
+            window.update_theme(self.theme)
         self.theme_button.configure(text="Hell" if self.theme == "dark" else "Dunkel")
         self.theme_choice.set(self.theme)
 
@@ -203,6 +207,8 @@ class MailArchive(DatabaseTab):
         self.table.bind("<<TreeviewSelect>>", self.show_selection)
         self.table.bind("<Button-3>", self.mail_menu)
         self.table.bind("<Delete>", lambda _: self.delete_selected_mails())
+        self.table.bind("<Double-1>", self.double_click_mail)
+        self.table.bind("<Return>", lambda _: self.open_mail_window())
 
         self.subject = ttk.Label(preview, text="Mailvorschau", style="Preview.TLabel")
         self.subject.pack(fill="x")
@@ -409,7 +415,7 @@ class MailArchive(DatabaseTab):
         if row not in self.table.selection():
             self.table.selection_set(row)
         address = sender_address(self.table.set(row, "sender"))
-        entries = []
+        entries = [("In eigenem Fenster öffnen", self.open_mail_window)]
         if address:
             entries.append((f"Nur Mails von {address} anzeigen", lambda: self.filter_sender(address)))
         if self.sender_filter:
@@ -420,6 +426,34 @@ class MailArchive(DatabaseTab):
                             self.delete_selected_mails))
         if entries:
             self.popup(event, entries)
+
+    def double_click_mail(self, event):
+        # Double-clicks on the column headings sort; only a row opens the mail.
+        if self.table.identify_region(event.x, event.y) in ("cell", "tree") and self.table.identify_row(event.y):
+            self.open_mail_window()
+            return "break"
+        return None
+
+    def open_mail_window(self):
+        """Show the selected mail in its own window; a mail that is already open is brought to the front."""
+        selected = self.table.selection()
+        if not selected:
+            return
+        mail_id = int(selected[0])
+        window = self.mail_windows.get(mail_id)
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_force()
+            return
+        try:
+            window = MailWindow(self, mail_id)
+        except (LookupError, OSError, sqlite3.Error) as error:
+            messagebox.showerror("Mail öffnen", str(error), parent=self.root)
+            return
+        self.mail_windows[mail_id] = window
+        window.bind("<Destroy>", lambda event, key=mail_id: self.mail_windows.pop(key, None)
+                    if event.widget is self.mail_windows.get(key) else None)
 
     def filter_sender(self, address):
         """Show only mails from one sender address (None removes the filter)."""
