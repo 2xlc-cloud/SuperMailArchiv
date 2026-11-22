@@ -18,6 +18,7 @@ from archive import (Account, account_folders, account_password, clean_password,
                      get_period, get_skip_deleted, resolve_period, set_period, set_skip_deleted, count_mails, delete_account, delete_folder_mails,
                      delete_mails, display_text, has_attachments, sender_address, store_attachment_flags,
                      unknown_attachment_flags, attachment_progress, build_search_index,
+                     create_list_indexes, list_indexes_ready,
                      spam_info, spam_progress, store_spam, unknown_spam,
                      get_mail, initialize, load_folders, remember_password, remove_account, save_account,
                      saved_accounts, set_folder_selection, sync)
@@ -64,6 +65,7 @@ class MailArchive(DatabaseTab):
         self.foreground = threading.Event()
         self.maintenance_pause = threading.Event()  # Set during maintenance in the tab Datenbank.
         self.maintenance_running = False
+        self.list_preparing = False  # Indexes for the mail list are being created (once, 1.16.1).
         self.index_lock = threading.Lock()
         self.sync_auto = False
         self.next_auto = time.time() + FIRST_AUTO_SYNC
@@ -1210,7 +1212,8 @@ class MailArchive(DatabaseTab):
         self.refresh()
 
     def background_work(self):
-        """First the search index (needed for fast searching), then the spam ratings and the paperclips."""
+        """First the list and search indexes (needed for a fast list and search), then spam and paperclips."""
+        self.prepare_list_indexes()
         self.index_search()
         self.read_spam_ratings()
         self.detect_attachments()
@@ -1272,6 +1275,19 @@ class MailArchive(DatabaseTab):
         suspicious = self.spam_suspicious(info["score"], info["flag"], info["dmarc_fail"])
         reasons = f" · Gründe: {', '.join(info['reasons'][:4])}" if suspicious and info["reasons"] else ""
         return ("⚠ Spamverdacht: " if suspicious else "Spam-Bewertung: ") + ", ".join(parts) + reasons
+
+    def prepare_list_indexes(self):
+        """Once for archives from before 1.16.1: indexes that let the mail list skip the large mail rows."""
+        while True:
+            try:
+                if list_indexes_ready(self.path):
+                    return
+                self.events.put(("list_indexes", False))
+                create_list_indexes(self.path)
+                self.events.put(("list_indexes", True))
+                return
+            except (OSError, sqlite3.Error):
+                time.sleep(5)  # E.g. a sync is writing; try again.
 
     def index_search(self):
         """Add all not yet indexed mails to the search index (one run at a time)."""
@@ -1483,6 +1499,10 @@ class MailArchive(DatabaseTab):
     def start_sync(self):
         if self.busy or self.maintenance_running or self.account_id is None:
             return
+        if self.list_preparing:
+            messagebox.showinfo("Abrufen", "Das Archiv wird gerade einmalig vorbereitet. Bitte in einer Minute "
+                                "noch einmal versuchen.", parent=self.root)
+            return
         try:
             account, password = self.account_and_password()
         except (ValueError, OSError, sqlite3.Error) as error:
@@ -1553,6 +1573,15 @@ class MailArchive(DatabaseTab):
             if event == "update_installed":
                 self.update_installed(*value)
                 continue
+            if event == "list_indexes":
+                self.list_preparing = not value
+                if not value:
+                    self.status.set("Archiv wird einmalig für schnelle Listen vorbereitet (bis etwa eine Minute) …")
+                else:
+                    if self.status.get().startswith("Archiv wird einmalig"):
+                        self.status.set("Archiv vorbereitet")
+                    self.refresh()
+                continue
             if event == "index_progress":
                 indexed, total = value
                 if not self.busy and indexed < total:
@@ -1597,6 +1626,7 @@ class MailArchive(DatabaseTab):
                 continue
             self.finish_sync(*value)
         if self.settings["interval"] and not self.busy and not self.maintenance_running and \
+                not self.list_preparing and \
                 time.time() >= self.next_auto:
             self.start_auto_sync()
         self.update_next_label()

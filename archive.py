@@ -504,7 +504,37 @@ def initialize(path):
                 # 1.15.0: spam rating of the mail server; spam_checked NULL = not yet read from the headers.
                 db.execute(f"ALTER TABLE mails ADD COLUMN {column} {kind}")
         _create_search_index(db)
+        if not db.execute("SELECT EXISTS(SELECT 1 FROM mails)").fetchone()[0]:
+            _create_list_indexes(db)  # Instant for an empty archive; existing ones get them in the background.
         db.commit()
+
+
+# The mail list must never read the mail rows themselves: each row holds the whole original mail, so reading
+# all rows of a large archive takes seconds to minutes when the file is not in the disk cache. These indexes hold
+# every column the list shows or sorts by (1.16.1), so sorting and paging only read the indexes.
+LIST_COLUMNS = "sender, subject, has_attachments, spam_score, spam_flag, dmarc_fail, spam_checked, length(raw)"
+
+
+def _create_list_indexes(db):
+    db.execute(f"CREATE INDEX IF NOT EXISTS mail_list_v5 ON mails(sent, id, account_id, folder, {LIST_COLUMNS})")
+    db.execute(f"CREATE INDEX IF NOT EXISTS mail_folder_v5 ON mails(account_id, folder, sent, id, {LIST_COLUMNS})")
+    # Replaced by the two above (same leading columns).
+    db.execute("DROP INDEX IF EXISTS mail_date_v4")
+    db.execute("DROP INDEX IF EXISTS mail_folder_v4")
+
+
+def list_indexes_ready(path):
+    with closing(connect(path)) as db:
+        return db.execute("SELECT count(*) FROM sqlite_master WHERE type='index' "
+                          "AND name IN ('mail_list_v5', 'mail_folder_v5')").fetchone()[0] == 2
+
+
+def create_list_indexes(path):
+    """Create the list indexes (once, may take a minute for a large archive)."""
+    with closing(connect(path)) as db, db:
+        db.execute("PRAGMA busy_timeout=60000")
+        db.execute("BEGIN IMMEDIATE")
+        _create_list_indexes(db)
 
 
 # Archive period: '' (no limit), 'today', 'yesterday', 'week' (7 days ago) or 'YYYY-MM' (a month).
@@ -883,7 +913,8 @@ def find_mails(path, query, offset=0, limit=100, account_id=None, folder=None, s
     key = SORT_KEYS.get(sort, "sent")
     if sort == "spam":
         key = f"(CASE WHEN {suspicious_sql(threshold)} THEN 1000 ELSE 0 END + coalesce(spam_score, -1000))"
-    order = f"{key} {direction}, sent {direction}, id {direction}"
+    # No duplicate "sent" when sorting by date: SQLite would then not use the index for the order.
+    order = ", ".join(dict.fromkeys((f"{key} {direction}", f"sent {direction}", f"id {direction}")))
     with closing(connect(path)) as db:
         return db.execute(
             f"SELECT id, sender, subject, sent, has_attachments, length(raw) AS size, spam_score, spam_flag, "
