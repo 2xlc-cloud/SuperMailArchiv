@@ -52,6 +52,20 @@ Im Reiter **Einstellungen** lässt sich festlegen:
 
 Ein erneuter Start der App öffnet das bereits laufende Fenster, statt eine zweite Instanz zu starten.
 
+## Datenbank
+
+Der Reiter **Datenbank** zeigt und pflegt die Archivdatei:
+
+- **Archivdatei:** Pfad der geöffneten Datei, **Im Explorer zeigen**, **Anderes Archiv öffnen …** (z. B. auf einem anderen Laufwerk), **Neues Archiv anlegen …** und **Standardarchiv verwenden**. Beim Wechsel startet die App neu. Konten, gespeicherte Passwörter, Ordnerauswahl und Zeitraum gehören zum jeweiligen Archiv. Fehlt das gewählte Archiv beim Start (etwa ein nicht angeschlossenes Laufwerk), fragt die App, ob sie stattdessen das Standardarchiv öffnen soll; sie legt dort nie stillschweigend ein leeres Archiv an.
+- **Übersicht:** Dateigröße, ungenutzter Platz, Anzahl Mails, Konten und Ordner, Zeitraum der Mails, Stand des Suchindex, freier Speicher und Format.
+- **Sicherung erstellen …:** Schreibt eine vollständige Kopie an einen frei wählbaren Ort. Die Kopie entsteht zuerst als `.teil`-Datei, wird geprüft und erst dann umbenannt; ein Abbruch hinterlässt keine halbe Sicherung.
+- **Sicherung wiederherstellen …:** Ersetzt das geöffnete Archiv nach einer Rückfrage durch eine Sicherung. Das geschieht beim Neustart, bevor die App das Archiv benutzt. Das bisherige Archiv bleibt daneben als `archiv-vor-Wiederherstellung <Datum>.sqlite3` erhalten. Gespeicherte Passwörter lassen sich nur unter demselben Windows-Benutzer entschlüsseln.
+- **Schnell prüfen / Vollständig prüfen:** Prüft die Datei (SQLite `quick_check` bzw. `integrity_check`), die Verweise zwischen Mails und Konten und den Suchindex.
+- **Komprimieren:** Schreibt die Datei neu und gibt ungenutzten Platz frei (VACUUM), z. B. nach dem Löschen im Entwicklermodus.
+- **Suchindex neu aufbauen:** Leert den Suchindex; die App baut ihn im Hintergrund neu auf.
+
+Während eines Abrufs ist keine Sicherung oder Wartung möglich und umgekehrt; der automatische Abruf wartet. Prüfen, Komprimieren und Sichern lassen sich abbrechen; das Archiv bleibt dann unverändert.
+
 ## Updates
 
 Die Updateroutine stammt aus SuperPyBackup. Die App prüft beim Start und danach alle 12 Stunden, ob es auf GitHub (2xlc-cloud/SuperMailArchiv) eine neuere Release gibt. Abschalten lässt sich das unter **Einstellungen → Updates**. Beim Prüfen wird nie etwas heruntergeladen. Eine neue Version meldet die App einmal je Version in der Statuszeile und, wenn das Fenster verborgen ist, neben der Uhr.
@@ -67,7 +81,7 @@ Danach wird die laufende EXE ersetzt; die bisherige bleibt als SuperMailBackup.e
 
 ## Lokale Daten
 
-Die Datenbank liegt unter %LOCALAPPDATA%\MailArchiv\archiv.sqlite3, die Einstellungen daneben in einstellungen.json. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
+Die Datenbank liegt standardmäßig unter %LOCALAPPDATA%\MailArchiv\archiv.sqlite3 (anderer Ort: Reiter **Datenbank**), die Einstellungen immer in %LOCALAPPDATA%\MailArchiv\einstellungen.json. Der Datenordner behält seinen bisherigen Namen, damit vorhandene Archive direkt weiterverwendet werden.
 
 Ab Version 1.3.0 speichert das Archiv zu jeder Mail ihren IMAP-Ordner. Beim ersten Start wird ein vorhandenes Archiv umgestellt. Frühere Konten mit gleichem Server und Benutzernamen, aber verschiedenen Ordnern, werden dabei zu einem Konto zusammengeführt. Ältere Programmversionen können das umgestellte Archiv nicht mehr öffnen. Die App legt deshalb vorher eine Kopie unter archiv-vor-1.3.sqlite3 ab, die nicht mehr benötigt wird, sobald alles funktioniert.
 

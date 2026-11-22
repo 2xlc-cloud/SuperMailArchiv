@@ -8,7 +8,10 @@ from pathlib import Path
 from app_info import APP_NAME
 
 DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True, "interval": 0, "developer": False,
-            "sort": "date", "sort_descending": True, "check_updates": True, "spam_threshold": 5}
+            "sort": "date", "sort_descending": True, "check_updates": True, "spam_threshold": 5,
+            # Tab Datenbank: chosen archive file ("" = standard archive), backup to restore at the next start,
+            # last backup {"time", "file"}.
+            "database": "", "restore_from": "", "last_backup": {}}
 # Points of the server's spam rating from which a mail is marked as suspicious.
 SPAM_THRESHOLDS = (3, 4, 5, 6, 7, 8, 10)
 # Automatic sync interval in minutes; 0 switches it off.

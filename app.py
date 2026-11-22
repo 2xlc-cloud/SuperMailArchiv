@@ -23,6 +23,7 @@ from archive import (Account, account_folders, account_password, clean_password,
                      saved_accounts, set_folder_selection, sync)
 from appearance import PALETTES, apply_theme
 from attachments import AttachmentPane, remove_old_temporary_files
+from database_tab import DatabaseTab
 from program_icon import png_icon
 from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
                       set_autostart)
@@ -35,13 +36,15 @@ PAGE = 100
 FIRST_AUTO_SYNC = 60  # Seconds after program start, so the backup runs soon after Windows starts.
 
 
-class MailArchive:
+class MailArchive(DatabaseTab):
     def __init__(self, root, data, start_minimized=False):
         self.root = root
-        self.path = data / "archiv.sqlite3"
+        self.data = data
+        self.settings = Settings(data)
+        self.path = self.choose_archive_path()
+        restore_note = self.apply_pending_restore()
         initialize(self.path)
         remove_old_temporary_files()
-        self.settings = Settings(data)
         self.theme = self.settings["theme"]
         self.events = queue.Queue()
         self.tray = TrayIcon(APP_NAME, lambda action: self.events.put(("tray", action)))
@@ -59,6 +62,9 @@ class MailArchive:
         # Set while the user interface queries the database; the background work then pauses, because both
         # need Python's global interpreter lock and the interface must not wait for it.
         self.foreground = threading.Event()
+        self.maintenance_pause = threading.Event()  # Set during maintenance in the tab Datenbank.
+        self.maintenance_running = False
+        self.index_lock = threading.Lock()
         self.sync_auto = False
         self.next_auto = time.time() + FIRST_AUTO_SYNC
         root.title(f"{APP_NAME} {VERSION_TEXT}")
@@ -82,6 +88,10 @@ class MailArchive:
                 root.withdraw()
             else:
                 root.iconify()
+        if restore_note:
+            kind, text = restore_note
+            root.after(300, lambda: (messagebox.showerror if kind == "error" else messagebox.showinfo)(
+                "Sicherung wiederherstellen", text, parent=root))
         root.after(100, self.poll)
         threading.Thread(target=self.background_work, daemon=True, name="Hintergrundarbeit").start()
         root.after(10_000, self.scheduled_update_check)
@@ -126,8 +136,10 @@ class MailArchive:
         outer = self.archive_tab = ttk.Frame(self.tabs, padding=12)
         self.accounts_tab = ttk.Frame(self.tabs, padding=12)
         self.settings_tab = ttk.Frame(self.tabs, padding=12)
+        self.database_tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(outer, text="Archiv")
         self.tabs.add(self.accounts_tab, text="Konten")
+        self.tabs.add(self.database_tab, text="Datenbank")
         self.tabs.add(self.settings_tab, text="Einstellungen")
 
         search_bar = ttk.Frame(outer)
@@ -232,6 +244,7 @@ class MailArchive:
 
         self.build_accounts()
         self.build_settings()
+        self.build_database()
 
     def build_settings(self):
         page = self.settings_tab
@@ -555,8 +568,8 @@ class MailArchive:
         if info.forced and updater.installed_dir():
             self.run_update(info, forced=True)
             return
-        if manual or not updater.already_notified(self.path.parent, info.version):
-            updater.remember_notified(self.path.parent, info.version)
+        if manual or not updater.already_notified(self.data, info.version):
+            updater.remember_notified(self.data, info.version)
             self.status.set(f"Neue Version {info.version} verfügbar · Einstellungen → Update installieren")
             if self.root.state() == "withdrawn":
                 self.tray.balloon(f"{APP_NAME} {info.version} verfügbar",
@@ -629,9 +642,11 @@ class MailArchive:
 
     def restart(self):
         """Start the (new) program shortly after this one has ended (only one instance may run)."""
-        program = sys.executable
+        program = f'"{sys.executable}"'
+        if not getattr(sys, "frozen", False):  # Started as script (development): run the script again.
+            program += f' "{Path(sys.argv[0]).resolve()}"'
         if self.quit():
-            subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{program}"',
+            subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" {program}',
                              creationflags=0x08000000)  # No console window.
 
     def change_spam_threshold(self):
@@ -1093,7 +1108,8 @@ class MailArchive:
     def update_account_buttons(self):
         saved = self.account_id is not None
         self.remove_button.configure(state="normal" if saved else "disabled")
-        self.sync_button.configure(state="normal" if saved and not self.busy else "disabled")
+        self.sync_button.configure(state="normal" if saved and not self.busy and not self.maintenance_running
+                                   else "disabled")
         self.load_folders_button.configure(state="normal" if saved and not self.loading_folders else "disabled")
         self.store_password_button.configure(state="normal" if saved else "disabled")
         self.clear_password_button.configure(state="normal" if self.has_password else "disabled")
@@ -1194,17 +1210,8 @@ class MailArchive:
         self.refresh()
 
     def background_work(self):
-        """First the search index (needed for fast searching), then the paperclips."""
-        while True:
-            try:
-                indexed, total = build_search_index(self.path)
-            except (OSError, sqlite3.Error):
-                time.sleep(5)  # E.g. database busy; try again later.
-                continue
-            self.events.put(("index_progress", (indexed, total)))
-            if indexed >= total:
-                break
-            time.sleep(0.05)
+        """First the search index (needed for fast searching), then the spam ratings and the paperclips."""
+        self.index_search()
         self.read_spam_ratings()
         self.detect_attachments()
 
@@ -1266,8 +1273,31 @@ class MailArchive:
         reasons = f" · Gründe: {', '.join(info['reasons'][:4])}" if suspicious and info["reasons"] else ""
         return ("⚠ Spamverdacht: " if suspicious else "Spam-Bewertung: ") + ", ".join(parts) + reasons
 
+    def index_search(self):
+        """Add all not yet indexed mails to the search index (one run at a time)."""
+        if not self.index_lock.acquire(blocking=False):
+            return
+        try:
+            while True:
+                self.pause_for_interface()
+                try:
+                    indexed, total = build_search_index(self.path)
+                except (OSError, sqlite3.Error):
+                    time.sleep(5)  # E.g. database busy; try again later.
+                    continue
+                self.events.put(("index_progress", (indexed, total)))
+                if indexed >= total:
+                    break
+                time.sleep(0.05)
+        finally:
+            self.index_lock.release()
+
+    def start_search_index(self):
+        """After "Suchindex neu aufbauen": rebuild the index in the background."""
+        threading.Thread(target=self.index_search, daemon=True, name="Suchindex").start()
+
     def pause_for_interface(self):
-        while self.foreground.is_set():
+        while self.foreground.is_set() or self.maintenance_pause.is_set():
             time.sleep(0.01)
 
     def detect_attachments(self):
@@ -1451,7 +1481,7 @@ class MailArchive:
                 messagebox.showerror("Export fehlgeschlagen", str(error), parent=self.root)
 
     def start_sync(self):
-        if self.busy or self.account_id is None:
+        if self.busy or self.maintenance_running or self.account_id is None:
             return
         try:
             account, password = self.account_and_password()
@@ -1498,6 +1528,8 @@ class MailArchive:
                     self.show_window()
                 elif value == "quit" and self.quit():
                     return
+                continue
+            if self.handle_database_event(event, value):
                 continue
             if event == "spam_ratings":
                 for mail_id, (score, flag, dmarc_fail, _) in value.items():
@@ -1564,7 +1596,8 @@ class MailArchive:
                         self.show_account_folders()
                 continue
             self.finish_sync(*value)
-        if self.settings["interval"] and not self.busy and time.time() >= self.next_auto:
+        if self.settings["interval"] and not self.busy and not self.maintenance_running and \
+                time.time() >= self.next_auto:
             self.start_auto_sync()
         self.update_next_label()
         self.root.after(100, self.poll)
@@ -1615,6 +1648,12 @@ class MailArchive:
             self.tray.balloon(APP_NAME, "Läuft im Infobereich weiter. Beenden per Rechtsklick auf das Symbol.")
 
     def quit(self):
+        if self.maintenance_running:
+            self.show_window()
+            if not messagebox.askyesno(APP_NAME, "Laufende Wartung abbrechen und beenden? Das Archiv bleibt dabei "
+                                                 "unverändert.", parent=self.root):
+                return False
+            self.maintenance_cancel.set()
         if self.busy:
             self.show_window()
             if not messagebox.askyesno(APP_NAME, "Laufenden Abruf abbrechen und beenden?", parent=self.root):
