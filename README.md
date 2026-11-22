@@ -10,9 +10,10 @@ Aus dem Quellcode starten:
 
 1. Unter Windows Python 3.10 oder neuer mit Tkinter installieren.
 2. Das Repository klonen oder über GitHub als ZIP herunterladen und entpacken.
-3. [Start-SuperMailBackup.cmd](Start-SuperMailBackup.cmd) per Doppelklick ausführen. Python-Zusatzpakete sind nicht nötig.
-4. Im Reiter **Konten** IMAP-Server, TLS-Port und Benutzername hinterlegen. Standardmäßig verwendet die App Port 993.
-5. Das Passwort oder App-Passwort eingeben und **Abrufen** wählen. Konten mit ausschließlich OAuth werden derzeit nicht unterstützt.
+3. Für die HTML-Ansicht einmalig `python -m pip install tkinterweb` ausführen (ohne das Paket läuft die App, zeigt Mails aber nur als Text).
+4. [Start-SuperMailBackup.cmd](Start-SuperMailBackup.cmd) per Doppelklick ausführen.
+5. Im Reiter **Konten** IMAP-Server, TLS-Port und Benutzername hinterlegen. Standardmäßig verwendet die App Port 993.
+6. Das Passwort oder App-Passwort eingeben und **Abrufen** wählen. Konten mit ausschließlich OAuth werden derzeit nicht unterstützt.
 
 ## Archiv
 
@@ -31,7 +32,8 @@ Anfangs ausgewählt sind alle Ordner außer Spam, Papierkorb und bei Gmail den S
 - Spalte **Spam**: Bewertung des Mailservers (rspamd/SpamAssassin, DMARC) aus den Kopfzeilen; ⚠ markiert verdächtige Mails (ab einstellbarer Punktzahl, Standard 5, oder bei DMARC fail bzw. Server-Markierung). Schalter **Nur verdächtige ⚠** neben der Suche; die Vorschau nennt die Gründe. Es wird nichts gelöscht oder aussortiert.
 - Rechtsklick auf eine Mail → **Nur Mails von … anzeigen** filtert auf die Adresse dieses Absenders, unabhängig vom angezeigten Namen. Der Filter wirkt zusammen mit Suche, Ordner und Sortierung. Neben dem Suchfeld steht dann „Von: … ✕“; ein Klick darauf hebt den Filter auf.
 - Jede Nachricht anhand ihrer eindeutigen Mail-ID identifizieren und bei Bedarf als EML exportieren.
-- **Doppelklick** auf eine Mail (oder Enter, oder Rechtsklick → **In eigenem Fenster öffnen**) öffnet ein eigenes Fenster mit allen Details: Von, An, Cc, Antwort an, Datum, Größe, Konto, Ordner, Spam-Bewertung und Mail-ID, darunter die Reiter **Nachricht** (mit anklickbaren Links), **Anhänge** und **Kopfzeilen** (alle Kopfzeilen im Original). **Original als .eml speichern …** und **Im Mailprogramm öffnen** (z. B. Outlook oder Thunderbird) arbeiten mit einer Kopie des Originals. Mehrere Mails lassen sich nebeneinander öffnen; Esc schließt das Fenster.
+- **Doppelklick** auf eine Mail (oder Enter, oder Rechtsklick → **In eigenem Fenster öffnen**) öffnet ein eigenes Fenster mit allen Details: Von, An, Cc, Antwort an, Datum, Größe, Konto, Ordner, Spam-Bewertung und Mail-ID, darunter die Reiter **HTML** (bei HTML-Mails, vorausgewählt), **Nachricht** (Text mit anklickbaren Links), **Anhänge** und **Kopfzeilen** (alle Kopfzeilen im Original). **Original als .eml speichern …** und **Im Mailprogramm öffnen** (z. B. Outlook oder Thunderbird) arbeiten mit einer Kopie des Originals. Mehrere Mails lassen sich nebeneinander öffnen; Esc schließt das Fenster.
+- Die **HTML-Ansicht** stellt Layout, Tabellen, Farben und die in der Mail enthaltenen Bilder dar (Tkhtml über tkinterweb; modernes CSS nur eingeschränkt). Skripte laufen nie, Formulare, eingebettete Seiten (iframe) und automatische Weiterleitungen sind abgeschaltet, Links öffnen sich nur per Klick im Standardbrowser. **Bilder aus dem Internet** werden zunächst blockiert, damit Absender über Tracking-Pixel nicht erfahren, dass und wann die Mail geöffnet wurde; **Externe Bilder laden** holt sie für die angezeigte Mail nach.
 - Links in der Nachricht (http, https, mailto, www.) sind anklickbar und öffnen sich im Standardbrowser bzw. Mailprogramm. Beim Darüberfahren zeigt die Statuszeile das Ziel. Bei HTML-Mails steht das tatsächliche Linkziel sichtbar hinter dem Linktext.
 - Bild- und PDF-Anhänge zeigen im Reiter **Anhänge** eine kleine Vorschau, PDFs die erste Seite. Ein Klick darauf oder **Vorschau** öffnet ein scrollbares Vorschaufenster: Bilder in voller Breite, PDFs mit bis zu 30 Seiten untereinander. Gescrollt wird mit den Scrollbalken, dem Mausrad (Umschalt + Mausrad seitwärts) oder Bild↑/Bild↓, Pos1/Ende; Esc schließt das Fenster. Die Bilder stammen von Windows (wie im Explorer); PDFs rendert der in Windows 10/11 eingebaute PDF-Renderer. Text-Anhänge lassen sich ebenfalls ansehen, weitere gängige Formate über die zugeordnete Windows-Anwendung öffnen.
 - Zum Öffnen erzeugte Kopien von Anhängen löscht die App beim nächsten Start, sobald sie älter als einen Tag sind.
@@ -109,7 +111,7 @@ Die Versionsnummer steht zentral in [app_info.py](app_info.py). Sie erscheint im
 Unter Windows im Projektordner ausführen:
 
 ~~~powershell
-python -m pip install pyinstaller
+python -m pip install pyinstaller tkinterweb
 python build_exe.py
 ~~~
 

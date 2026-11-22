@@ -50,7 +50,10 @@ def main():
         "--noconfirm", "--clean", "--onefile", "--windowed", "--noupx",
         "--name", APP_NAME, "--version-file", str(resource), "--icon", str(icon),
         "--workpath", str(build / "work"), "--specpath", str(build),
-        "--distpath", str(project / "dist"), str(project / "app.py"),
+        "--distpath", str(project / "dist"),
+        # HTML view (1.19.0): tkinterweb loads the Tkhtml library and its resource files at run time.
+        "--collect-all", "tkinterweb", "--collect-all", "tkinterweb_tkhtml",
+        str(project / "app.py"),
     ])
     write_release_files(project / "dist")
 

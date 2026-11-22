@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from appearance import PALETTES, style_native_widgets
 from archive import display_text
 from attachments import AttachmentPane, write_temporary
+from html_view import HtmlView
 
 LINK_PATTERN = re.compile(r"(?:https?://|mailto:|www\.)[^\s<>\"'«»]+[^\s<>\"'«».,;:!?)\]}]", re.I)
 HEADER_FIELDS = (("From", "Von"), ("To", "An"), ("Cc", "Cc"), ("Reply-To", "Antwort an"), ("Date", "Datum (Kopfzeile)"))
@@ -178,6 +179,13 @@ class MailWindow(tk.Toplevel):
         text = display_text(self.raw) or row["body"] or "(Kein Textinhalt. Das Original enthält auch etwaige Anhänge.)"
         self.body.show(text)
         self.tabs.add(self.body, text="Nachricht")
+        self.html = HtmlView(self.tabs, self.raw, self.status)
+        if self.html.available:
+            # HTML mails open in their rendered form; the plain text stays one click away.
+            self.tabs.insert(0, self.html, text="HTML")
+            self.tabs.select(self.html)
+            self.tabs.bind("<<NotebookTabChanged>>", self.tab_changed, add="+")
+            self.after_idle(self.tab_changed)
         self.attachments = AttachmentPane(self.tabs, app.theme)
         count = self.attachments.show_mail(self.raw)
         self.tabs.add(self.attachments, text=f"Anhänge ({count})" if count else "Anhänge")
@@ -186,6 +194,13 @@ class MailWindow(tk.Toplevel):
         self.tabs.add(self.headers, text="Kopfzeilen")
         self.update_theme(app.theme)
         self.focus_set()
+
+    def tab_changed(self, _event=None):
+        if self.winfo_exists() and self.tabs.select() == str(self.html):
+            try:
+                self.html.render()
+            except Exception as error:  # E.g. Tkhtml missing: the text view stays available.
+                self.status.set(f"HTML-Ansicht nicht verfügbar: {error}")
 
     def initial_geometry(self):
         """Next to the main window, cascaded when several detail windows are open."""
