@@ -128,6 +128,8 @@ def apply_theme(root, name):
     primary_background = accent if palette["dark"] else button
     # Dark or white text, whichever contrasts more with the design's accent colour.
     primary_foreground = palette["on_accent"] if palette["dark"] else fg
+    # Small buttons, e.g. paging above the mail list.
+    style.configure("Small.TButton", padding=(8, 1), font=("Segoe UI", 8))
     style.configure("Accent.TButton", background=primary_background, foreground=primary_foreground,
                     font=("Segoe UI", 10, "bold"), padding=(14, 8))
     style.map("Accent.TButton", background=[("disabled", panel), ("pressed", selection),

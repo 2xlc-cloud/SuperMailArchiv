@@ -201,14 +201,15 @@ class MailArchive(DatabaseTab):
             panes.forget(folders)
         self.root.bind("<Control-b>", lambda _: self.toggle_folders())
 
+        # Paging: small buttons above the list.
         nav = ttk.Frame(results)
-        nav.pack(side="bottom", fill="x", pady=(7, 0))
-        self.prev = ttk.Button(nav, text="Zurück", command=lambda: self.change_page(-PAGE))
+        nav.pack(side="top", fill="x", pady=(0, 4))
+        self.prev = ttk.Button(nav, text="◀ Zurück", style="Small.TButton", command=lambda: self.change_page(-PAGE))
         self.prev.pack(side="left")
-        self.next = ttk.Button(nav, text="Weiter", command=lambda: self.change_page(PAGE))
+        self.next = ttk.Button(nav, text="Weiter ▶", style="Small.TButton", command=lambda: self.change_page(PAGE))
         self.next.pack(side="right")
         self.page_label = ttk.Label(nav, style="Muted.TLabel")
-        self.page_label.pack(pady=7)
+        self.page_label.pack()
         self.table = ttk.Treeview(results, columns=tuple(self.COLUMNS), show="headings", selectmode="extended")
         for key, (label, width) in self.COLUMNS.items():
             anchor = self.ANCHORS.get(key, "w")
@@ -236,7 +237,7 @@ class MailArchive(DatabaseTab):
         self.meta = ttk.Label(preview, style="Muted.TLabel", justify="left")
         self.meta.pack(fill="x", pady=(5, 10))
         self.meta.bind("<Configure>", lambda event: self.meta.configure(wraplength=event.width))
-        identifier = ttk.Frame(preview)
+        identifier = self.identifier_row = ttk.Frame(preview)
         identifier.pack(fill="x", pady=(0, 8))
         ttk.Label(identifier, text="Mail-ID").pack(side="left", padx=(0, 6))
         self.mail_id = tk.StringVar()
@@ -245,7 +246,7 @@ class MailArchive(DatabaseTab):
         )
         self.copy_button = ttk.Button(identifier, text="Kopieren", command=self.copy_mail_id, state="disabled")
         self.copy_button.pack(side="left", padx=(5, 0))
-        actions = ttk.Frame(preview)
+        actions = self.preview_actions = ttk.Frame(preview)
         actions.pack(side="bottom", fill="x", pady=(8, 0))
         self.export = ttk.Button(actions, text="Original als .eml speichern",
                                  command=self.export_mail, state="disabled")
@@ -254,6 +255,7 @@ class MailArchive(DatabaseTab):
                                         state="disabled")
         self.preview_tabs = ttk.Notebook(preview)
         self.preview_tabs.pack(fill="both", expand=True)
+        self.show_preview_header(self.settings["preview_position"] != "bottom")
         message = ttk.Frame(self.preview_tabs)
         self.attachments = AttachmentPane(self.preview_tabs, self.theme)
         self.preview_tabs.add(message, text="Nachricht")
@@ -1103,10 +1105,23 @@ class MailArchive(DatabaseTab):
         # Below the list the preview would otherwise claim nearly all the height (it asks for a tall text field).
         if hasattr(self, "body"):
             self.body.configure(height=6 if below else 24)
+            self.show_preview_header(not below)
         if below:
             self.mail_panes.bind("<Map>", lambda _: self.root.after_idle(self.split_preview), add="+")
             self.root.after_idle(self.split_preview)
         self.position_button.configure(text="Vorschau rechts" if below else "Vorschau unten")
+
+    def show_preview_header(self, visible):
+        """Below the list only the message and its attachments are shown; the details stay in the detail window
+        (double-click)."""
+        parts = ((self.subject, {"fill": "x"}), (self.meta, {"fill": "x", "pady": (5, 10)}),
+                 (self.identifier_row, {"fill": "x", "pady": (0, 8)}),
+                 (self.preview_actions, {"side": "bottom", "fill": "x", "pady": (8, 0)}))
+        for widget, options in parts:
+            widget.pack_forget()
+        if visible:
+            for widget, options in parts:
+                widget.pack(before=self.preview_tabs, **options)
 
     def split_preview(self):
         """With the preview below: 45 % of the height for the mail list, the rest for the preview."""
