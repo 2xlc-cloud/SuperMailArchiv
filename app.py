@@ -11,7 +11,7 @@ import webbrowser
 import tkinter as tk
 from datetime import date, datetime
 from pathlib import Path
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from app_info import APP_NAME, VERSION_TEXT
 from archive import (Account, clean_password, display_text, has_attachments, resolve_period, sender_address,
@@ -61,6 +61,7 @@ class MailArchive(DatabaseTab):
         self.accounts = {}
         self.preview_id = None
         self.mail_windows = {}  # Open detail windows by mail id.
+        self.resending = False  # "Erneut zusenden" is putting mails back into an inbox.
         self.visible_unknown = set()  # Mails on the current page whose paperclip is not yet known.
         self.visible_unrated = set()  # Mails on the current page whose spam rating was not yet read.
         # Set while the user interface queries the database; the background work then pauses, because both
@@ -251,6 +252,9 @@ class MailArchive(DatabaseTab):
         self.export = ttk.Button(actions, text="Original als .eml speichern",
                                  command=self.export_mail, state="disabled")
         self.export.pack(side="right")
+        self.resend_button = ttk.Button(actions, text="Erneut zusenden …", command=self.resend_selected_mails,
+                                        state="disabled")
+        self.resend_button.pack(side="right", padx=(0, 6))
         self.delete_button = ttk.Button(actions, text="Aus Archiv löschen …", command=self.delete_selected_mails,
                                         state="disabled")
         self.preview_tabs = ttk.Notebook(preview)
@@ -436,7 +440,10 @@ class MailArchive(DatabaseTab):
         if row not in self.table.selection():
             self.table.selection_set(row)
         address = sender_address(self.table.set(row, "sender"))
-        entries = [("In eigenem Fenster öffnen", self.open_mail_window)]
+        count = len(self.table.selection())
+        entries = [("In eigenem Fenster öffnen", self.open_mail_window),
+                   (f"{count} Mails erneut zusenden …" if count > 1 else "Erneut zusenden …",
+                    self.resend_selected_mails)]
         if address:
             entries.append((f"Nur Mails von {address} anzeigen", lambda: self.filter_sender(address)))
         if self.sender_filter:
@@ -475,6 +482,65 @@ class MailArchive(DatabaseTab):
         self.mail_windows[mail_id] = window
         window.bind("<Destroy>", lambda event, key=mail_id: self.mail_windows.pop(key, None)
                     if event.widget is self.mail_windows.get(key) else None)
+
+    def resend_selected_mails(self):
+        self.resend_mails(list(self.table.selection()))
+
+    def resend_mails(self, keys, parent=None):
+        """Put archived mails back into the inbox of the account they came from (IMAP, unread, subject with
+        "[Archiv]" in front). The copies are not archived again by the next sync."""
+        parent = parent or self.root
+        if not keys:
+            return
+        if self.resending or self.maintenance_running:
+            messagebox.showinfo("Erneut zusenden", "Bitte warte, bis die laufende Aktion beendet ist.", parent=parent)
+            return
+        try:
+            groups = self.archive.resend_groups(keys)
+        except (LookupError, OSError, sqlite3.Error) as error:
+            messagebox.showerror("Erneut zusenden", str(error), parent=parent)
+            return
+        what = "Die Mail" if len(keys) == 1 else f"Die {len(keys)} Mails"
+        inboxes = ", ".join(sorted({account.user for account, _ in groups.values()}, key=str.casefold))
+        if not messagebox.askyesno(
+                "Erneut zusenden",
+                f"{what} erneut in den Posteingang von {inboxes} legen?\n\n"
+                "Die Kopie erscheint dort als ungelesene neue Mail; der Betreff beginnt mit „[Archiv]“. Inhalt und "
+                "Anhänge bleiben unverändert. Beim nächsten Abruf wird die Kopie nicht noch einmal archiviert.",
+                parent=parent):
+            return
+        jobs = []
+        for key, (account, mail_keys) in groups.items():
+            try:
+                password = self.archive.account_password(key) or simpledialog.askstring(
+                    "IMAP-Passwort", f"Passwort für {account.label}:", show="*", parent=parent)
+                if not password:
+                    return
+                jobs.append((key, account, clean_password(password), mail_keys))
+            except (ValueError, OSError, sqlite3.Error) as error:
+                messagebox.showerror("Erneut zusenden", str(error), parent=parent)
+                return
+        self.resending = True
+        self.status.set(f"{what} {'wird' if len(keys) == 1 else 'werden'} erneut zugestellt …")
+
+        def work():
+            done, errors = 0, []
+            for key, account, password, mail_keys in jobs:
+                try:
+                    done += self.archive.resend(key, account, password, mail_keys)
+                except Exception as error:
+                    errors.append((account.user, str(error) or type(error).__name__))
+            self.events.put(("resent", (done, errors, parent)))
+
+        threading.Thread(target=work, daemon=True, name="Erneut zusenden").start()
+
+    def resend_finished(self, done, errors, parent):
+        self.resending = False
+        self.status.set(f"{done} Mail{'' if done == 1 else 's'} mit „[Archiv]“ erneut in den Posteingang gelegt")
+        if errors:
+            text = "\n".join(f"{user}: {error}" for user, error in errors)
+            messagebox.showerror("Erneut zusenden", f"Nicht alle Mails wurden zugestellt.\n\n{text}",
+                                 parent=parent if parent.winfo_exists() else self.root)
 
     def filter_sender(self, address):
         """Show only mails from one sender address (None removes the filter)."""
@@ -1574,6 +1640,7 @@ class MailArchive(DatabaseTab):
                 or "(Kein Textinhalt. Das Original enthält auch etwaige Anhänge.)") if row else ""
         self.show_body(text)
         self.export.configure(state="normal" if row else "disabled")
+        self.resend_button.configure(state="normal" if row else "disabled")
         self.delete_button.configure(state="normal" if row else "disabled")
         if mail_id != self.preview_id:
             self.preview_id = mail_id
@@ -1725,6 +1792,9 @@ class MailArchive(DatabaseTab):
                 continue
             if event == "update_check":
                 self.update_checked(*value)
+                continue
+            if event == "resent":
+                self.resend_finished(*value)
                 continue
             if event == "update_installed":
                 self.update_installed(*value)

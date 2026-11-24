@@ -172,6 +172,8 @@ class MailWindow(tk.Toplevel):
         ttk.Button(actions, text="Schließen", command=self.destroy).pack(side="right")
         ttk.Button(actions, text="Original als .eml speichern …", command=self.save_original).pack(side="left")
         ttk.Button(actions, text="Im Mailprogramm öffnen", command=self.open_original).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="Erneut zusenden …",
+                   command=lambda: self.app.resend_mails([self.mail_id], parent=self)).pack(side="left", padx=(6, 0))
 
         self.tabs = ttk.Notebook(page)
         self.tabs.pack(fill="both", expand=True)

@@ -503,6 +503,10 @@ def initialize(path):
             if column not in columns:
                 # 1.15.0: spam rating of the mail server; spam_checked NULL = not yet read from the headers.
                 db.execute(f"ALTER TABLE mails ADD COLUMN {column} {kind}")
+        # 1.22.0: copies put back into the inbox with "Erneut zusenden"; the sync skips them (no duplicates).
+        db.execute("""CREATE TABLE IF NOT EXISTS resent_copies (
+                          account_id INTEGER NOT NULL, folder TEXT NOT NULL, validity INTEGER NOT NULL,
+                          uid INTEGER NOT NULL, PRIMARY KEY (account_id, folder, validity, uid))""")
         _create_search_index(db)
         if not db.execute("SELECT EXISTS(SELECT 1 FROM mails)").fetchone()[0]:
             _create_list_indexes(db)  # Instant for an empty archive; existing ones get them in the background.
@@ -668,7 +672,7 @@ def delete_account(path, account_id):
             db.execute("BEGIN IMMEDIATE")
             _remove_from_index(db, "account_id=?", (account_id,))
             deleted = db.execute("DELETE FROM mails WHERE account_id=?", (account_id,)).rowcount
-            for table in ("folders", "account_options"):
+            for table in ("folders", "account_options", "resent_copies"):
                 db.execute(f"DELETE FROM {table} WHERE account_id=?", (account_id,))
             db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
         _finish_delete(db)
@@ -1062,6 +1066,69 @@ def _connect_imap(account, password):
     return client
 
 
+RESENT_HEADER = b"X-SuperMailBackup-Resent"
+ARCHIVE_PREFIX = "[Archiv]"
+
+
+def _split_header(raw):
+    end = re.search(rb"\r?\n\r?\n", raw)
+    return (raw[:end.start()], raw[end.start():]) if end else (raw, b"\r\n\r\n")
+
+
+def is_resent_copy(raw):
+    return re.search(rb"(?im)^" + re.escape(RESENT_HEADER) + rb"[ \t]*:", _split_header(raw)[0]) is not None
+
+
+def resent_copy(raw, mail_id):
+    """The archived original with "[Archiv]" in front of the subject and a marker header (so the next sync does
+    not archive the copy again). Body, attachments and all other headers stay as they are."""
+    head, rest = _split_header(raw)
+    fields = []
+    for line in re.split(rb"\r?\n", head):
+        if line[:1] in (b" ", b"\t") and fields:
+            fields[-1] += b"\r\n" + line  # Continuation of a folded header line.
+        elif line:
+            fields.append(line)
+    subject, kept = "", []
+    for field in fields:
+        name = field.split(b":", 1)[0].strip().lower()
+        if name == b"subject":
+            try:
+                subject = str(BytesParser(policy=policy.default).parsebytes(field + b"\r\n\r\n")["subject"] or "")
+            except Exception:
+                subject = field.split(b":", 1)[-1].decode("utf-8", "replace").strip()
+        elif name != RESENT_HEADER.lower():
+            kept.append(field)
+    subject = " ".join(subject.split())
+    if not subject.startswith(ARCHIVE_PREFIX):
+        subject = f"{ARCHIVE_PREFIX} {subject}".strip()
+    marker = RESENT_HEADER + b": " + re.sub(rb"[^!-~]", b"", str(mail_id).encode("ascii", "replace"))
+    subject_field = policy.SMTP.fold("Subject", subject).rstrip("\r\n").encode("ascii")
+    return b"\r\n".join([marker, subject_field, *kept]) + rest
+
+
+def resend(path, account, password, mail_ids, folder="INBOX"):
+    """Put the archived mails back into the account's inbox (IMAP APPEND, unread, received now), each with
+    "[Archiv]" in front of the subject. Returns the number of mails put back."""
+    with closing(connect(path)) as db:
+        rows = []
+        for mail_id in mail_ids:
+            row = db.execute("SELECT mail_id, raw FROM mails WHERE id=?", (mail_id,)).fetchone()
+            if row is None:
+                raise LookupError("Die Mail ist nicht mehr im Archiv.")
+            rows.append(row)
+    done = 0
+    with _connect_imap(account, password) as client:
+        for row in rows:
+            status, data = client.append(mailbox_argument(folder), None, None, resent_copy(bytes(row["raw"]),
+                                                                                         row["mail_id"]))
+            if status != "OK":
+                detail = data[0].decode("utf-8", "replace") if data and isinstance(data[0], bytes) else ""
+                raise ValueError(f"Der Server hat die Mail nicht angenommen. {detail}".strip())
+            done += 1
+    return done
+
+
 def _refresh_folders(client, db, account):
     """Read the server's folder list, remember it and return the account ID."""
     status, data = client.list()
@@ -1164,7 +1231,8 @@ def _sync_folder(client, db, account_id, folder, progress, cancelled, criteria=(
     if status != "OK" or not data or data[0] is None:
         raise ValueError("Der Server konnte die Nachrichtenliste nicht liefern.")
     known = {r[0] for r in db.execute(
-        "SELECT uid FROM mails WHERE account_id=? AND folder=? AND validity=?", key
+        "SELECT uid FROM mails WHERE account_id=?1 AND folder=?2 AND validity=?3 "
+        "UNION SELECT uid FROM resent_copies WHERE account_id=?1 AND folder=?2 AND validity=?3", key
     )}
     pending = sorted({int(uid) for uid in data[0].split()} - known, reverse=True)
     saved, missing = 0, 0
@@ -1200,6 +1268,11 @@ def _sync_folder(client, db, account_id, folder, progress, cancelled, criteria=(
                 ).timestamp()) if internal else 0
             except (ValueError, TypeError, OverflowError, OSError):
                 received = 0
+            if is_resent_copy(raw):
+                # A copy put back with "Erneut zusenden": remember it so it is neither archived nor fetched again.
+                with db:
+                    db.execute("INSERT OR IGNORE INTO resent_copies VALUES (?,?,?,?)", (*key, uid))
+                break
             with db:
                 cursor = db.execute(
                     """INSERT INTO mails

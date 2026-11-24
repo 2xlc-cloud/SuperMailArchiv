@@ -209,6 +209,22 @@ class ArchiveSet:
     def get_mail(self, mail_key, raw=False):
         return store.get_mail(*self.mail_place(mail_key), raw=raw)
 
+    def resend_groups(self, mail_keys):
+        """{account key: (account, [mail keys])}: the mails to put back, by the account they were archived from."""
+        groups = {}
+        for mail_key in mail_keys:
+            path, _ = self.mail_place(mail_key)
+            row = self.get_mail(mail_key)
+            if row is None:
+                raise LookupError("Die Mail ist nicht mehr im Archiv.")
+            account = store.Account(row["host"], row["port"], row["user"])
+            groups.setdefault(self.account_key(path, row["account_id"]), (account, []))[1].append(mail_key)
+        return groups
+
+    def resend(self, account_key, account, password, mail_keys):
+        path, _ = self.account_place(account_key)
+        return store.resend(path, account, password, [self.mail_place(key)[1] for key in mail_keys])
+
     # --- Background work over all files ----------------------------------------------------------------------
 
     def list_indexes_ready(self):
