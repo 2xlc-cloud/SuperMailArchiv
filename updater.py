@@ -32,11 +32,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import ed25519
-from app_info import APP_NAME, VERSION_TEXT
+from app_info import APP_NAME, LEGACY_NAME, VERSION_TEXT
 
 REPOSITORY = "2xlc-cloud/SuperMailArchiv"
 API_URL = "https://api.github.com"
-ASSETS = (f"{APP_NAME}.exe",)
+# Installs from before the renaming (1.23.0) still hold SuperMailBackup.exe; it is updated under that name.
+ASSETS = (f"{APP_NAME}.exe", f"{LEGACY_NAME}.exe")
 SUMS_NAME = "SHA256SUMS.txt"
 SIG_NAME = "SHA256SUMS.txt.sig"
 # Public keys (hex) of the release signature; several allow a key change (old and new at the same time).

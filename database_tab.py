@@ -16,7 +16,7 @@ from app_info import APP_NAME
 from appearance import apply_theme
 from archive_set import account_files
 
-ARCHIVE_TYPES = [("SuperMailBackup-Archiv", "*.sqlite3"), ("Alle Dateien", "*.*")]
+ARCHIVE_TYPES = [(f"{APP_NAME}-Archiv", "*.sqlite3"), ("Alle Dateien", "*.*")]
 
 
 def size_text(size):

@@ -5,7 +5,7 @@ import sys
 import winreg
 from pathlib import Path
 
-from app_info import APP_NAME
+from app_info import APP_NAME, LEGACY_NAME
 from appearance import THEMES
 
 DEFAULTS = {"theme": "dark", "tray": True, "start_hidden": True, "interval": 0, "developer": False,
@@ -85,6 +85,22 @@ def autostart_entry():
             return value if isinstance(value, str) else None
     except OSError:
         return None
+
+
+def migrate_autostart():
+    """Autostart entries from before the renaming (1.23.0) are registered under the old name: move them to the new
+    name, started by this program. Returns True when an entry was moved."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+            try:
+                winreg.QueryValueEx(key, LEGACY_NAME)
+            except FileNotFoundError:
+                return False
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+            winreg.DeleteValue(key, LEGACY_NAME)
+            return True
+    except OSError:
+        return False
 
 
 def set_autostart(enabled):

@@ -1066,6 +1066,7 @@ def _connect_imap(account, password):
     return client
 
 
+# Kept from before the renaming (1.23.0): copies sent by 1.22.0 carry this header.
 RESENT_HEADER = b"X-SuperMailBackup-Resent"
 ARCHIVE_PREFIX = "[Archiv]"
 

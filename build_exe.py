@@ -44,7 +44,7 @@ def main():
     build.mkdir(exist_ok=True)
     resource = build / "version_info.txt"
     resource.write_text(version_resource(), encoding="utf-8")
-    icon = build / "SuperMailBackup.ico"
+    icon = build / f"{APP_NAME}.ico"
     icon.write_bytes(ico_icon())
     run([
         "--noconfirm", "--clean", "--onefile", "--windowed", "--noupx",
@@ -53,6 +53,8 @@ def main():
         "--distpath", str(project / "dist"),
         # HTML view (1.19.0): tkinterweb loads the Tkhtml library and its resource files at run time.
         "--collect-all", "tkinterweb", "--collect-all", "tkinterweb_tkhtml",
+        # Pillow uses numpy only if installed; the program does not need it (about 18 MB less, 1.23.0).
+        "--exclude-module", "numpy",
         str(project / "app.py"),
     ])
     write_release_files(project / "dist")
@@ -62,9 +64,17 @@ def write_release_files(dist):
     """SHA256SUMS.txt (and its signature, if the signing key exists) for a GitHub release; see README."""
     import hashlib
 
+    import shutil
+
+    from app_info import LEGACY_NAME
+
     exe = dist / f"{APP_NAME}.exe"
+    # Same program under the name up to 1.22.0, so installed older versions find their update (see README).
+    legacy = dist / f"{LEGACY_NAME}.exe"
+    shutil.copyfile(exe, legacy)
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
     sums = dist / "SHA256SUMS.txt"
-    sums.write_text(f"{hashlib.sha256(exe.read_bytes()).hexdigest()} *{exe.name}\n", encoding="utf-8")
+    sums.write_text(f"{digest} *{exe.name}\n{digest} *{legacy.name}\n", encoding="utf-8")
     sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
     import sign_release
 

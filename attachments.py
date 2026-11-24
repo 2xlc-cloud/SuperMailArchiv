@@ -40,7 +40,8 @@ def safe_filename(name):
 def remove_old_temporary_files(max_age_days=1):
     """Delete attachment copies from earlier sessions; opened files may still be in use, so keep recent ones."""
     limit = time.time() - max_age_days * 86400
-    for folder in Path(tempfile.gettempdir()).glob("SuperMailBackup-*"):
+    for folder in [*Path(tempfile.gettempdir()).glob("SuperNMailArchiv-*"),
+                   *Path(tempfile.gettempdir()).glob("SuperMailBackup-*")]:  # Name up to 1.22.0
         try:
             if folder.is_dir() and folder.stat().st_mtime < limit:
                 shutil.rmtree(folder, ignore_errors=True)
@@ -60,7 +61,7 @@ def is_visual(item):
 
 def write_temporary(item, suffix):
     """Write an attachment to a new temporary folder, marked as coming from the Internet; returns the file."""
-    folder = Path(tempfile.mkdtemp(prefix="SuperMailBackup-"))
+    folder = Path(tempfile.mkdtemp(prefix="SuperNMailArchiv-"))
     destination = folder / ("Anhang" + suffix)
     destination.write_bytes(item.read())
     # Preserve the Internet origin of mail attachments for Windows and Office.

@@ -1,6 +1,6 @@
-# SuperMailBackup
+# SuperNMailArchiv
 
-SuperMailBackup archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Beim ersten Start ist das dunkle Design „Nachtblau“ aktiv; oben rechts unter **Design …** stehen 20 Designs zur Wahl.
+SuperNMailArchiv (bis Version 1.22.0: SuperMailBackup) archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Beim ersten Start ist das dunkle Design „Nachtblau“ aktiv; oben rechts unter **Design …** stehen 20 Designs zur Wahl.
 
 ## Starten
 
@@ -11,7 +11,7 @@ Aus dem Quellcode starten:
 1. Unter Windows Python 3.10 oder neuer mit Tkinter installieren.
 2. Das Repository klonen oder über GitHub als ZIP herunterladen und entpacken.
 3. Für die HTML-Ansicht einmalig `python -m pip install tkinterweb` ausführen (ohne das Paket läuft die App, zeigt Mails aber nur als Text).
-4. [Start-SuperMailBackup.cmd](Start-SuperMailBackup.cmd) per Doppelklick ausführen.
+4. [Start-SuperNMailArchiv.cmd](Start-SuperNMailArchiv.cmd) per Doppelklick ausführen.
 5. Im Reiter **Konten** IMAP-Server, TLS-Port und Benutzername hinterlegen. Standardmäßig verwendet die App Port 993.
 6. Das Passwort oder App-Passwort eingeben und **Abrufen** wählen. Konten mit ausschließlich OAuth werden derzeit nicht unterstützt.
 
@@ -66,7 +66,7 @@ Der Reiter **Datenbank** zeigt und pflegt den Archivordner:
 
 - **Archivordner:** Pfad des geöffneten Ordners, **Im Explorer zeigen**, **Anderen Archivordner öffnen …** (z. B. auf einem anderen Laufwerk), **Neuen Archivordner anlegen …** (leerer Ordner) und **Standardarchiv verwenden**. Beim Wechsel startet die App neu. Fehlt der gewählte Ordner beim Start (etwa ein nicht angeschlossenes Laufwerk), fragt die App, ob sie stattdessen das Standardarchiv öffnen soll; sie legt dort nie stillschweigend ein leeres Archiv an.
 - **Übersicht** und **Konto-Dateien:** Größe, ungenutzter Platz, Anzahl Mails, Zeitraum, Stand des Suchindex, freier Speicher; je Datei Konto, Mails und Größe.
-- **Sicherung erstellen …:** Legt am gewählten Ort einen neuen Ordner `SuperMailBackup-Sicherung <Datum>` mit einer geprüften Kopie jeder Konto-Datei an. Ein Abbruch oder Fehler hinterlässt keinen halben Sicherungsordner.
+- **Sicherung erstellen …:** Legt am gewählten Ort einen neuen Ordner `SuperNMailArchiv-Sicherung <Datum>` mit einer geprüften Kopie jeder Konto-Datei an. Ein Abbruch oder Fehler hinterlässt keinen halben Sicherungsordner.
 - **Sicherung wiederherstellen …:** Ersetzt den Inhalt des Archivordners nach einer Rückfrage durch einen Sicherungsordner – oder durch eine einzelne Archivdatei einer Version bis 1.17, die dabei auf Konto-Dateien aufgeteilt wird. Das geschieht beim Neustart, bevor die App das Archiv benutzt. Die bisherigen Konto-Dateien bleiben im Unterordner `vor-Wiederherstellung <Datum>` erhalten. Gespeicherte Passwörter lassen sich nur unter demselben Windows-Benutzer entschlüsseln.
 - **Schnell prüfen / Vollständig prüfen:** Prüft jede Konto-Datei (SQLite `quick_check` bzw. `integrity_check`), die Verweise zwischen Mails und Konten und den Suchindex.
 - **Komprimieren:** Schreibt die Konto-Dateien neu und gibt ungenutzten Platz frei (VACUUM), z. B. nach dem Löschen im Entwicklermodus.
@@ -91,7 +91,7 @@ Die Updateroutine stammt aus SuperPyBackup. Die App prüft beim Start und danach
 - Größe und SHA-256 der EXE
 - Probelauf der neuen EXE mit `--version`
 
-Danach wird die laufende EXE ersetzt; die bisherige bleibt als SuperMailBackup.exe.old erhalten (**Vorversion wiederherstellen**). Bei jedem Fehler bleibt die installierte Version unverändert. Liegt die installierte Version mehr als 5 veröffentlichte Versionen zurück, installiert die App das Update als **Pflichtupdate** ohne Rückfrage, mit denselben Prüfungen. Updates gibt es nur für die EXE, nicht beim Start aus dem Quellcode.
+Danach wird die laufende EXE ersetzt; die bisherige bleibt als `.old`-Datei daneben erhalten (**Vorversion wiederherstellen**). Bei jedem Fehler bleibt die installierte Version unverändert. Liegt die installierte Version mehr als 5 veröffentlichte Versionen zurück, installiert die App das Update als **Pflichtupdate** ohne Rückfrage, mit denselben Prüfungen. Updates gibt es nur für die EXE, nicht beim Start aus dem Quellcode.
 
 ## Lokale Daten
 
@@ -118,15 +118,17 @@ python -m pip install pyinstaller tkinterweb
 python build_exe.py
 ~~~
 
-Der Build erzeugt die Datei **dist/SuperMailBackup.exe**. Die Architektur der EXE entspricht der verwendeten Python-Installation. Daneben entstehen **dist/SHA256SUMS.txt** und, wenn der Signaturschlüssel vorhanden ist, **dist/SHA256SUMS.txt.sig**.
+Der Build erzeugt die Datei **dist/SuperNMailArchiv.exe** und dieselbe Datei noch einmal als **dist/SuperMailBackup.exe** (alter Name, siehe unten). Die Architektur der EXE entspricht der verwendeten Python-Installation. Daneben entstehen **dist/SHA256SUMS.txt** und, wenn der Signaturschlüssel vorhanden ist, **dist/SHA256SUMS.txt.sig**.
 
 ### Release veröffentlichen
 
 Der geheime Signaturschlüssel liegt außerhalb des Repositorys unter `%USERPROFILE%\.supermailbackup\release-signing.key`; nur das eigene Windows-Konto hat Zugriff. Er gehört in eine Datensicherung: Geht er verloren, akzeptieren bestehende Installationen keine neuen Versionen mehr. Ein neuer Schlüssel entsteht nur mit `python tools\sign_release.py keygen`; sein öffentlicher Teil muss dann in `updater.RELEASE_PUBLIC_KEYS` stehen.
 
-Eine Release braucht alle drei Dateien, als Tag die Versionsnummer mit vorangestelltem `v`:
+Eine Release braucht alle vier Dateien, als Tag die Versionsnummer mit vorangestelltem `v`:
 
 ~~~powershell
 python build_exe.py
-gh release create v1.14.0 dist\SuperMailBackup.exe dist\SHA256SUMS.txt dist\SHA256SUMS.txt.sig --title "SuperMailBackup 1.14.0"
+gh release create v1.23.0 dist\SuperNMailArchiv.exe dist\SuperMailBackup.exe dist\SHA256SUMS.txt dist\SHA256SUMS.txt.sig --title "SuperNMailArchiv 1.23.0"
 ~~~
+
+**Umbenennung (1.23.0):** Bis Version 1.22.0 hieß das Programm SuperMailBackup. Installierte ältere Versionen suchen ihr Update unter dem Namen `SuperMailBackup.exe` und behalten diesen Dateinamen auch danach. Darum enthält jede Release das Programm unter beiden Namen; `SHA256SUMS.txt` führt beide (gleiche Prüfsumme). Ein Autostart-Eintrag unter dem alten Namen wird beim Start auf den neuen Namen umgestellt. Interne Kennungen bleiben absichtlich beim alten Namen: das Fenster für die Einzelinstanz-Prüfung (eine ältere Instanz wird weiter erkannt), die Kopfzeile `X-SuperMailBackup-Resent` und der Ordner `%LOCALAPPDATA%\MailArchiv` mit Archiv und Einstellungen. Der Name des GitHub-Repositorys bleibt `SuperMailArchiv`, weil installierte Versionen Downloads nur von dort annehmen.

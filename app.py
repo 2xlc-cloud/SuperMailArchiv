@@ -24,7 +24,7 @@ from theme_dialog import ThemeDialog
 from mail_window import MailWindow
 from program_icon import png_icon
 from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
-                      set_autostart)
+                      migrate_autostart, set_autostart)
 from tray import TrayIcon, signal_running_instance
 import updater
 
@@ -39,6 +39,7 @@ class MailArchive(DatabaseTab):
         self.root = root
         self.data = data
         self.settings = Settings(data)
+        migrate_autostart()  # Autostart entry from before the renaming (1.23.0).
         self.events = queue.Queue()
         # Created first: its hidden window marks the running instance, also during a long conversion below.
         self.tray = TrayIcon(APP_NAME, lambda action: self.events.put(("tray", action)))

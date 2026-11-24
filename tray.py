@@ -14,6 +14,7 @@ CALLBACK = WM_APP + 1
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
 MENU_OPEN, MENU_QUIT = 1, 2
+# Kept from before the renaming (1.23.0): an older instance must still be recognised (only one may run).
 CLASS_NAME = "SuperMailBackup.Instance"
 
 

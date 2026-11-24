@@ -10,6 +10,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from app_info import APP_NAME
 from archive import SCHEMA_VERSION, connect, initialize
 from archive_set import next_file
 
@@ -60,7 +61,7 @@ def archive_problem(path):
     except OSError as error:
         return f"Die Datei kann nicht gelesen werden: {error}"
     if header != SQLITE_HEADER:
-        return "Die Datei ist keine SuperMailBackup-Archivdatenbank."
+        return f"Die Datei ist keine {APP_NAME}-Archivdatenbank."
     try:
         with closing(_open(path, readonly=True)) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -68,7 +69,7 @@ def archive_problem(path):
     except sqlite3.Error as error:
         return f"Die Datenbank kann nicht geöffnet werden: {error}"
     if not {"mails", "accounts"} <= tables:
-        return "Die Datei ist keine SuperMailBackup-Archivdatenbank."
+        return f"Die Datei ist keine {APP_NAME}-Archivdatenbank."
     if version > SCHEMA_VERSION:
         return "Das Archiv stammt von einer neueren Programmversion."
     return None
@@ -221,7 +222,7 @@ def backup_database(path, target, progress=None, cancel=None):
 
 
 def default_backup_name(now=None):
-    return f"SuperMailBackup-Sicherung {(now or datetime.now()):%Y-%m-%d %H-%M}.sqlite3"
+    return f"{APP_NAME}-Sicherung {(now or datetime.now()):%Y-%m-%d %H-%M}.sqlite3"
 
 
 def restore_database(path, source, progress=None):
@@ -398,7 +399,7 @@ def split_pending(source, folder):
 
 
 def default_backup_folder_name(now=None):
-    return f"SuperMailBackup-Sicherung {(now or datetime.now()):%Y-%m-%d %H-%M}"
+    return f"{APP_NAME}-Sicherung {(now or datetime.now()):%Y-%m-%d %H-%M}"
 
 
 def backup_archive(files, target, progress=None, cancel=None):
