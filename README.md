@@ -1,6 +1,6 @@
 # SuperNMailArchiv
 
-SuperNMailArchiv (bis Version 1.22.0: SuperMailBackup) archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Beim ersten Start ist das dunkle Design „Nachtblau“ aktiv; oben rechts unter **Design …** stehen 20 Designs zur Wahl.
+SuperNMailArchiv (bis Version 1.22.0: SuperMailBackup) archiviert E-Mails mehrerer IMAP-Konten in einer lokalen SQLite-Datenbank und bietet eine Offline-Suche mit Mailvorschau. Die Oberfläche folgt dem Design von SuperPyBackup. Oben links neben dem Programmtitel steht das Logo: ein Archivkasten mit Briefumschlag auf einem Farbverlauf von Violett nach Cyan. Es wird beim Start passend zur Bildschirmskalierung gezeichnet. Beim ersten Start ist das dunkle Design „Nachtblau“ aktiv; oben rechts unter **Design …** stehen 20 Designs zur Wahl.
 
 ## Starten
 

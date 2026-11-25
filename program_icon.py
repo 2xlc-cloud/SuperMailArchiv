@@ -71,6 +71,52 @@ def png_icon(size, color="blue"):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
 
 
+# Logo next to the program title (1.24.0): an archive box whose front is an envelope, on a violet-to-cyan
+# gradient. Coordinates in a 32 x 32 square, like the icon.
+LOGO_START, LOGO_END = (124, 92, 255), (28, 196, 236)
+
+
+def logo_color(x, y):
+    if not inside_rounded(x, y, 1, 1, 31, 31, 8):
+        return None
+    fraction = max(0.0, min(1.0, (x + y - 2) / 60))
+    background = tuple(round(a + (b - a) * fraction) for a, b in zip(LOGO_START, LOGO_END))
+    if inside_rounded(x, y, 6.5, 8, 25.5, 12.6, 1.6):  # Lid
+        return (255, 255, 255)
+    if inside_rounded(x, y, 8, 14, 24, 24.5, 2.2):  # Box front = envelope
+        if near_segment(x, y, (9.6, 15.6), (16, 20.2), 0.85) or near_segment(x, y, (16, 20.2), (22.4, 15.6), 0.85):
+            return tuple(round(channel * 0.85) for channel in background)
+        return (255, 255, 255)
+    return background
+
+
+def png_logo(size):
+    return _png(size, logo_color)
+
+
+def _png(size, color_at):
+    samples = 4 if size <= 64 else 2
+    unit = 32 / size
+    rows = bytearray()
+    for row in range(size):
+        rows.append(0)
+        for column in range(size):
+            colors = [color_at((column + (dx + 0.5) / samples) * unit, (row + (dy + 0.5) / samples) * unit)
+                      for dy in range(samples) for dx in range(samples)]
+            visible = [color for color in colors if color is not None]
+            if visible:
+                rows.extend(round(sum(channel) / len(visible)) for channel in zip(*visible))
+                rows.append(round(255 * len(visible) / len(colors)))
+            else:
+                rows.extend((0, 0, 0, 0))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
+
+
 def ico_icon():
     sizes = (16, 24, 32, 48, 64, 128, 256)
     header = struct.pack("<HHH", 0, 1, len(sizes))

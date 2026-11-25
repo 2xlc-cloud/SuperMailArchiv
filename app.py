@@ -22,7 +22,7 @@ from archive_set import ArchiveSet
 from database_tab import DatabaseTab
 from theme_dialog import ThemeDialog
 from mail_window import MailWindow
-from program_icon import png_icon
+from program_icon import png_icon, png_logo
 from settings import (INTERVALS, MINIMIZED_ARGUMENT, SPAM_THRESHOLDS, Settings, autostart_command, autostart_entry,
                       migrate_autostart, set_autostart)
 from tray import TrayIcon, signal_running_instance
@@ -135,6 +135,11 @@ class MailArchive(DatabaseTab):
     def build(self):
         header = ttk.Frame(self.root, padding=(16, 12, 16, 4))
         header.pack(fill="x")
+        # Logo (1.24.0) as high as the title line; it is drawn for the screen's scaling, so it stays sharp.
+        size = tkfont.Font(root=self.root, family="Segoe UI", size=18, weight="bold").metrics("linespace")
+        self.logo = tk.PhotoImage(master=self.root, data=base64.b64encode(png_logo(size)).decode("ascii"))
+        self.logo_label = ttk.Label(header, image=self.logo, style="Title.TLabel")
+        self.logo_label.pack(side="left", padx=(0, 10))
         ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
         self.theme_button = ttk.Button(header, text="Design …", command=self.choose_theme)
         self.theme_button.pack(side="right")
